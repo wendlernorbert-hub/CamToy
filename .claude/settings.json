@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip list *)",
+      "Bash(pip download *)",
+      "Bash(pip index *)",
+      "Bash(curl -L -s -o models/selfie_segmenter.tflite https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite)",
+      "Bash(python -c ' *)",
+      "Bash(python -)",
+      "Bash(python -c \"import ast;ast.parse\\(open\\('main.py',encoding='utf-8'\\).read\\(\\)\\)\")",
+      "Bash(python -c \"import ast;[ast.parse\\(open\\(f,encoding='utf-8'\\).read\\(\\)\\) for f in \\('main.py','comic.py','person.py'\\)]\")",
+      "Read(//c/Users/gg/AppData/Local/Temp/**)",
+      "Bash(SDL_AUDIODRIVER=dummy python -c ' *)",
+      "Bash(python -c \"import imageio_ffmpeg\")"
+    ]
+  }
+}
