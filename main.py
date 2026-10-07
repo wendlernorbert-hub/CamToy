@@ -1,3 +1,4 @@
+import os
 import sys
 import threading
 import time
@@ -6,32 +7,66 @@ import numpy as np
 import pygame
 
 import cleanup
-import theme
 import loading
-from ink import inkify, silhouette_ink
 
 CAPTURE_W = 640
 CAPTURE_H = 480
 DISPLAY_W = 1280
 DISPLAY_H = 720
 FPS       = 30
-PLAYER_SCALE = 1.0   # Anteil des Bildschirms, den der Spieler einnimmt (unten mittig)
 
 
-def open_camera(index: int = 0) -> cv2.VideoCapture:
+MAX_CAMERAS = 8
+
+
+def _try_open(index: int):
+    """Open camera `index` (DirectShow) and make sure it really delivers frames."""
     cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+    if cap.isOpened() and cap.read()[0]:
+        return cap
+    cap.release()
+    return None
+
+
+def _configure(cap: cv2.VideoCapture) -> None:
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAPTURE_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_H)
     cap.set(cv2.CAP_PROP_FPS,          FPS)
     cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
-    if not cap.isOpened():
-        raise RuntimeError(
-            "Webcam konnte nicht geöffnet werden.\n"
-            "Bitte prüfen:\n"
-            "  Einstellungen → Datenschutz & Sicherheit\n"
-            "  → Kamera → Desktop-Apps erlauben"
-        )
-    return cap
+
+
+def open_camera(attempts: int = 8):
+    """Returns (capture, index). Looks through all camera numbers, because phone-as-webcam
+    apps (DroidCam, ...) and virtual cameras do not sit at index 0. Set the environment
+    variable CAMTOY_CAMERA=<number> to force one. The camera can also stay busy for a moment
+    after a previous run released it, so the whole search is retried for a few seconds."""
+    forced = os.environ.get("CAMTOY_CAMERA", "").strip()
+    for _ in range(attempts):
+        order = [int(forced)] if forced.isdigit() else range(MAX_CAMERAS)
+        for i in order:
+            cap = _try_open(i)
+            if cap is not None:
+                _configure(cap)
+                return cap, i
+        time.sleep(0.6)
+    raise RuntimeError(
+        "Webcam wurde nicht gefunden.\n"
+        "Bitte prüfen:\n"
+        "  Ist die Kamera (oder DroidCam / die Handy-App) verbunden?\n"
+        "  Einstellungen → Datenschutz & Sicherheit → Kamera → Desktop-Apps erlauben\n"
+        "  Mit der Taste C wechselt man später zwischen mehreren Kameras."
+    )
+
+
+def next_camera(current: int):
+    """Opens the next working camera after `current` (wraps around). Returns (cap, index) or None."""
+    for step in range(1, MAX_CAMERAS):
+        i = (current + step) % MAX_CAMERAS
+        cap = _try_open(i)
+        if cap is not None:
+            _configure(cap)
+            return cap, i
+    return None
 
 
 class FrameGrabber:
@@ -44,11 +79,19 @@ class FrameGrabber:
         self._frame: np.ndarray | None = None
         self._seq = 0
         self._running = True
+        self._pending = None            # a new capture to switch to (handled by the reader thread)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def switch(self, cap: cv2.VideoCapture) -> None:
+        """Hands over a new capture; the reader thread swaps it in between two reads."""
+        self._pending = cap
+
     def _run(self) -> None:
         while self._running:
+            if self._pending is not None:
+                old, self._cap, self._pending = self._cap, self._pending, None
+                old.release()
             ret, frame = self._cap.read()
             if ret:
                 with self._lock:
@@ -62,6 +105,25 @@ class FrameGrabber:
     def stop(self) -> None:
         self._running = False
         self._thread.join(timeout=1.0)
+        for cap in (self._cap, self._pending):          # give the camera back
+            if cap is not None:
+                cap.release()
+
+
+def to_surface(frame_rgb: np.ndarray, size) -> pygame.Surface:
+    h, w = frame_rgb.shape[:2]
+    s = pygame.image.frombuffer(np.ascontiguousarray(frame_rgb).tobytes(), (w, h), "RGB")
+    return pygame.transform.smoothscale(s, size).convert()
+
+
+def cutout_surface(frame_rgb: np.ndarray, mask: np.ndarray, size) -> pygame.Surface:
+    h, w = frame_rgb.shape[:2]
+    if mask.shape != (h, w):
+        raise ValueError("Maske passt nicht zum Bild")
+    a = (np.clip((mask - 0.35) / 0.3, 0, 1) * 255).astype(np.uint8)
+    rgba = np.dstack((frame_rgb, a))
+    s = pygame.image.frombuffer(np.ascontiguousarray(rgba).tobytes(), (w, h), "RGBA")
+    return pygame.transform.smoothscale(s, size).convert_alpha()
 
 
 def main() -> None:
@@ -75,53 +137,45 @@ def main() -> None:
     pygame.mouse.set_visible(False)
     # exe only: wipe unpack folders that earlier crashed/killed runs left in %TEMP%
     threading.Thread(target=cleanup.remove_stale_temp_dirs, daemon=True).start()
-    pygame.display.set_caption("CamToy – Kung Fu")
+    pygame.display.set_caption("CamToy")
     clock    = pygame.time.Clock()
-    font     = theme.latin(30)
-
-    # Spieler verkleinert, unten mittig; Treffer-Maske wird identisch transformiert
-    player_w, player_h = int(DISPLAY_W * PLAYER_SCALE), int(DISPLAY_H * PLAYER_SCALE)
-    player_x, player_y = (DISPLAY_W - player_w) // 2, DISPLAY_H - player_h
-    shrink = np.float32([[PLAYER_SCALE, 0, CAPTURE_W * (1 - PLAYER_SCALE) / 2],
-                         [0, PLAYER_SCALE, CAPTURE_H * (1 - PLAYER_SCALE)]])
 
     # Heavy start-up work runs behind an animated loading screen
     res: dict = {}
 
     def load_camera() -> None:
-        res["cap"] = open_camera()
+        cap, index = open_camera()
         for _ in range(12):          # discard first frames while the camera warms up
-            res["cap"].read()
+            cap.read()
+        res["cam_index"] = index
+        res["grabber"] = FrameGrabber(cap)
 
-    def load_models() -> None:
-        from motion import MotionDetector
-        from person import PersonSegmenter     # pulls in mediapipe (slow import)
-        res["detector"]  = MotionDetector()
-        res["segmenter"] = PersonSegmenter()
-
-    def load_scene() -> None:
-        from background import build_background
-        res["background"] = build_background()
-
-    def load_game() -> None:
-        from kungfu import KungFuGame
-        from position import PositionGuide
-        res["game"]  = KungFuGame()
-        res["guide"] = PositionGuide((player_w, player_h))
+    def load_minigames() -> None:
+        from minigames.common import Ctx, Sounds, Speaker
+        from posetracker import PoseTracker
+        tracker = PoseTracker(res["grabber"], (CAPTURE_W, CAPTURE_H))
+        tracker.start()
+        tracker.ready.wait(30)
+        if tracker.error:
+            raise RuntimeError("Pose-Modell konnte nicht geladen werden.\n" + tracker.error)
+        res["tracker"] = tracker
+        photos = os.path.join(os.path.expanduser("~"), "Pictures", "CamToy")
+        res["ctx"] = Ctx(DISPLAY_W, DISPLAY_H, Sounds(True), Speaker(), tracker, photos)
+        from music import MusicPlayer
+        res["music"] = MusicPlayer()           # composes the menu / mini-game loops
 
     err = loading.run(screen, [
-        ("Kamera wird geöffnet …",   3, load_camera),
-        ("Erkennung wird geladen …", 4, load_models),
-        ("Tusche wird gerieben …",   3, load_scene),
-        ("Dojo wird vorbereitet …",  1, load_game),
+        ("Kamera wird geöffnet …",           3, load_camera),
+        ("Spiele und Musik werden geladen …", 6, load_minigames),
     ])
     if err is not None:
         if not isinstance(err, RuntimeError):
             raise err
-        screen.fill(theme.PAPER)
+        from minigames.common import text as _text
+        screen.fill((40, 20, 30))
         for i, line in enumerate(str(err).split("\n")):
-            surf = font.render(line, True, theme.VERMILION if i == 0 else theme.INK)
-            screen.blit(surf, (48, 48 + i * 42))
+            _text(screen, line, 34, (48, 60 + i * 46),
+                  (255, 120, 120) if i == 0 else (255, 255, 255), anchor="midleft")
         pygame.display.flip()
         while True:
             for ev in pygame.event.get():
@@ -129,79 +183,171 @@ def main() -> None:
                     pygame.quit()
                     sys.exit(1)
 
-    cap, detector, segmenter = res["cap"], res["detector"], res["segmenter"]
-    background, game, guide  = res["background"], res["game"], res["guide"]
-    # Reusable surfaces – avoid allocating new ones every frame
-    cam_surface = pygame.Surface((CAPTURE_W, CAPTURE_H), pygame.SRCALPHA)
-    cam_scaled  = pygame.Surface((player_w, player_h), pygame.SRCALPHA)
+    from menu import Menu
+    from minigames.animals import AnimalGame
+    from minigames.bubbles import BubbleGame
+    from minigames.dressup import DressUpGame
+    from minigames.kungfu_master import KungFuGame as KungFuMaster
+    from minigames.pizza import PizzaGame
+    from minigames.car import CarGame
+    from minigames.common import draw_cursors, rainbow, text
+    from minigames.pose import Pose
 
-    grabber   = FrameGrabber(cap)
-    last_seq  = 0
+    grabber, tracker, ctx = res["grabber"], res["tracker"], res["ctx"]
+    cam_index = res["cam_index"]
+    jukebox = res["music"]
+
+    MINIGAMES = [KungFuMaster, BubbleGame, AnimalGame, DressUpGame, PizzaGame, CarGame]
+    menu = Menu(ctx, [(g.title, g.icon) for g in MINIGAMES])
+
     last_time = time.perf_counter()
+    last_fid  = -1
+    cam_surf = person_surf = cam_small = person_small = None
+    mini = None
 
-    game.reset()
-    phase     = "position"   # position (T-pose + countdown) -> play
+    MINI_TRACKS = ["master", "bubbles", "animals", "dressup", "pizza", "car"]
+    pending, count_t, count_n = 0, 0.0, 3   # picked menu entry + its 3-2-1 countdown
+    phase = "menu"               # menu -> countdown -> mini -> menu
 
+    def goto_menu() -> None:
+        nonlocal phase, mini, last_fid
+        if mini is not None:
+            mini.on_exit()
+            mini = None
+        ctx.has_mask = False
+        tracker.set_segmentation(False)
+        tracker.set_active(True)
+        jukebox.play("menu")
+        last_fid = -1
+        phase = "menu"
+
+    def begin_countdown(choice: int) -> None:
+        """A game was picked with the hands: count 3-2-1, then it starts."""
+        nonlocal phase, pending, count_t, count_n
+        pending, count_t, count_n = choice, 0.0, 3
+        ctx.play("tick")
+        phase = "countdown"
+
+    def start_mini(i: int) -> None:
+        nonlocal phase, mini
+        mini = MINIGAMES[i](ctx)
+        tracker.set_active(True)
+        jukebox.play(MINI_TRACKS[i])
+        phase = "mini"
+
+    goto_menu()
+
+    running = True
     try:
-        while True:
+        while running:
             clock.tick(120)   # only idles while waiting for the next camera frame
+            now = time.perf_counter()
 
             for ev in pygame.event.get():
                 if ev.type == pygame.QUIT:
-                    break
-                if ev.type == pygame.KEYDOWN:
+                    running = False
+                elif ev.type == pygame.KEYDOWN:
                     if ev.key == pygame.K_ESCAPE:
-                        break
-                    if ev.key == pygame.K_F11:
+                        if phase in ("countdown", "mini"):
+                            goto_menu()
+                        else:
+                            running = False
+                    elif ev.key == pygame.K_F11:
                         pygame.display.toggle_fullscreen()
-                    if ev.key == pygame.K_SPACE and game.state == "game_over":
-                        game.reset()
-                        guide.reset()
-                        phase = "position"
-            else:
-                seq, frame = grabber.latest()
-                if frame is not None and seq != last_seq:
-                    last_seq = seq
-                    now = time.perf_counter()
-                    dt = min(now - last_time, 0.05)
-                    last_time = now
+                    elif ev.key == pygame.K_c:                # next camera (several webcams / DroidCam)
+                        found = next_camera(cam_index)
+                        if found:
+                            grabber.switch(found[0])
+                            cam_index = found[1]
+                    elif ev.key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                        ctx.level = ev.key - pygame.K_0
 
-                    motion = detector.update(frame)
-                    person, hit_zone = segmenter.refine(cv2.flip(segmenter.update(frame), 1))
-
-                    # Nur bewegte Körperteile (inkl. Hände knapp außerhalb der Maske) zählen
-                    if phase == "position":
-                        if guide.update(dt, person):
-                            phase = "play"
-                    else:
-                        hit = cv2.bitwise_and(motion, hit_zone)
-                        game.update(dt, cv2.warpAffine(hit, shrink, (CAPTURE_W, CAPTURE_H),
-                                                       flags=cv2.INTER_NEAREST))
-
-                    # Tusche-Look; Person mit Pinsel-Kontur per Alpha-Maske über den Hintergrund legen
-                    painting = inkify(cv2.cvtColor(cv2.flip(frame, 1), cv2.COLOR_BGR2RGB))
-                    alpha = silhouette_ink(painting, person)
-                    pygame.surfarray.blit_array(cam_surface, painting.swapaxes(0, 1))
-                    pygame.surfarray.pixels_alpha(cam_surface)[:] = alpha.T
-                    pygame.transform.smoothscale(cam_surface, (player_w, player_h), cam_scaled)
-                    screen.blit(background, (0, 0))
-                    screen.blit(cam_scaled, (player_x, player_y))
-
-                    if phase == "position":
-                        guide.draw(screen, (player_x, player_y))
-                    else:
-                        game.draw(screen)
-
-                    fps_surf = font.render(f"{clock.get_fps():.0f}", True, theme.INK_SOFT)
-                    screen.blit(fps_surf, (30, 26))
-
-                    pygame.display.flip()
+            # ---- menu / games: pose driven, full-frame camera picture ----
+            dt = min(now - last_time, 0.1)
+            last_time = now
+            if tracker.error:
+                screen.fill((40, 20, 30))
+                text(screen, "Kamera-Fehler: " + str(tracker.error)[:70], 34,
+                     (DISPLAY_W // 2, DISPLAY_H // 2))
+                pygame.display.flip()
                 continue
-            break
+
+            fid, frame, lm, mask = tracker.latest()
+            want_mask = bool(mini and mini.needs_mask)
+            # A game may show the player smaller, at a fixed spot (scale, left, top as screen
+            # fractions), e.g. sitting in a car. The pose is mapped into that picture too.
+            view = getattr(mini, "view", None) if phase == "mini" else None
+            if frame is not None and fid != last_fid:
+                last_fid = fid
+                cam_surf = to_surface(frame, (DISPLAY_W, DISPLAY_H))
+                person_surf = None
+                if want_mask and mask is not None:
+                    try:
+                        person_surf = cutout_surface(frame, mask, (DISPLAY_W, DISPLAY_H))
+                    except Exception:  # noqa: BLE001
+                        person_surf = None
+                if view:
+                    size = (int(DISPLAY_W * view[0]), int(DISPLAY_H * view[0]))
+                    cam_small = pygame.transform.smoothscale(cam_surf, size)
+                    person_small = (pygame.transform.smoothscale(person_surf, size)
+                                    if person_surf is not None else None)
+            ctx.has_mask = want_mask and person_surf is not None
+            if lm is not None and view:
+                lm = lm.copy()
+                lm[:, 0] = view[1] + lm[:, 0] * view[0]
+                lm[:, 1] = view[2] + lm[:, 1] * view[0]
+            pose = Pose(lm, DISPLAY_W, DISPLAY_H) if lm is not None else None
+
+            if phase == "mini":
+                mini.update(dt, pose)
+                if mini.exit:
+                    goto_menu()
+                    continue
+            elif phase == "countdown":
+                count_t += dt
+                if count_t >= 3.0:
+                    start_mini(pending)
+                    continue
+                if 3 - int(count_t) != count_n:          # a new number appeared
+                    count_n = 3 - int(count_t)
+                    ctx.play("tick")
+            else:
+                sel = menu.update(dt, pose)
+                if sel is not None:
+                    begin_countdown(sel)
+                    continue
+
+            if cam_surf:
+                screen.blit(cam_surf, (0, 0))
+            else:
+                screen.fill((60, 80, 120))
+            if phase == "mini":
+                mini.draw_back(screen, pose)
+                if view:
+                    where = (int(view[1] * DISPLAY_W), int(view[2] * DISPLAY_H))
+                    if ctx.has_mask and person_small is not None:
+                        screen.blit(person_small, where)
+                    elif cam_small is not None:           # no mask: show the camera window instead
+                        screen.blit(cam_small, where)
+                elif ctx.has_mask:
+                    screen.blit(person_surf, (0, 0))
+                mini.draw(screen, pose)
+            elif phase == "countdown":
+                veil = pygame.Surface((DISPLAY_W, DISPLAY_H), pygame.SRCALPHA)
+                veil.fill((20, 25, 70, 110))
+                screen.blit(veil, (0, 0))
+                frac = count_t - int(count_t)               # 0 -> 1 within each second
+                text(screen, str(count_n), int(380 - 120 * frac),
+                     (DISPLAY_W // 2, DISPLAY_H // 2 - 20), rainbow(count_n, 6, .55))
+                draw_cursors(screen, pose, count_t)
+            else:
+                menu.draw(screen, pose)
+            pygame.display.flip()
     finally:
+        if mini is not None:
+            mini.on_exit()
+        tracker.stop()
         grabber.stop()
-        segmenter.close()
-        cap.release()
         pygame.quit()
 
 

@@ -1,17 +1,18 @@
-"""Ink-style loading screen: the window opens at once, heavy start-up work
-(camera, models, scene rendering) runs in a worker thread while this screen
-animates a progress brush stroke."""
+"""Loading screen in the shared (menu) look: the window opens at once, heavy start-up work
+(camera, models, scene rendering) runs in a worker thread while this screen animates a
+progress bar. Deliberately neutral - it precedes the mode menu, not one particular game."""
 import math
 import sys
 import threading
 import time
 
+import numpy as np
 import pygame
 
-import theme
-from theme import DISPLAY_W, DISPLAY_H
+from minigames.common import rainbow, text
 
-_BAR_W, _BAR_H = 560, 22
+DISPLAY_W, DISPLAY_H = 1280, 720
+_BAR_W, _BAR_H = 560, 26
 
 
 class _Worker(threading.Thread):
@@ -35,45 +36,45 @@ class _Worker(threading.Thread):
 
 
 def _static_scene() -> pygame.Surface:
-    surf = pygame.Surface((DISPLAY_W, DISPLAY_H))
-    surf.fill(theme.PAPER)
-    pygame.draw.rect(surf, theme.INK, (10, 10, DISPLAY_W - 20, DISPLAY_H - 20), 3)
-    pygame.draw.rect(surf, theme.INK_SOFT, (18, 18, DISPLAY_W - 36, DISPLAY_H - 36), 1)
-    cx = DISPLAY_W // 2
-    stamp = theme.seal("拳", 130, -6)
-    surf.blit(stamp, stamp.get_rect(center=(cx, 230)))
-    title = theme.text_with_outline(theme.latin(96), "KUNG FU", theme.INK, theme.PAPER, 3)
-    surf.blit(title, title.get_rect(center=(cx, 365)))
-    return surf
+    """Same blue gradient family as the mode menu."""
+    yy = np.linspace(0, 1, DISPLAY_H, dtype=np.float32)[:, None, None]
+    xx = np.linspace(0, 1, DISPLAY_W, dtype=np.float32)[None, :, None]
+    top, bot = np.float32((52, 70, 160)), np.float32((50, 130, 150))
+    arr = top * (1 - yy) + bot * yy
+    arr = arr * (1 - 0.15 * xx) + np.float32((90, 70, 130)) * 0.15 * xx
+    surf = pygame.surfarray.make_surface(np.clip(arr, 0, 255).astype(np.uint8)
+                                         .repeat(1, axis=0).swapaxes(0, 1))
+    return surf.convert()
 
 
-def _draw(screen, scene, progress: float, label_surf) -> None:
+def _draw(screen, scene, progress: float, label: str, t: float) -> None:
     screen.blit(scene, (0, 0))
     cx = DISPLAY_W // 2
-    bx, by = cx - _BAR_W // 2, 470
-    pygame.draw.rect(screen, theme.PAPER_DARK, (bx, by, _BAR_W, _BAR_H), border_radius=11)
+    title = "CamToy"
+    f_w = 96
+    x = cx - len(title) * f_w / 2 + f_w / 2
+    for i, ch in enumerate(title):
+        text(screen, ch, 150, (x + i * f_w, 270 + 8 * math.sin(t * 3 + i)), rainbow(i, 6, .6))
+
+    bx, by = cx - _BAR_W // 2, 450
+    pygame.draw.rect(screen, (255, 255, 255, 90), (bx - 4, by - 4, _BAR_W + 8, _BAR_H + 8),
+                     border_radius=17)
+    pygame.draw.rect(screen, (40, 50, 120), (bx, by, _BAR_W, _BAR_H), border_radius=13)
     fill = int(_BAR_W * progress)
     if fill > 0:
-        pygame.draw.rect(screen, theme.VERMILION,
-                         (bx, by, max(fill, _BAR_H), _BAR_H), border_radius=11)
-        # a loaded brush: wet ink drop at the stroke's tip
-        pygame.draw.circle(screen, theme.VERMILION_DARK,
-                           (bx + max(fill, _BAR_H) - 11, by + _BAR_H // 2), 5)
-    pygame.draw.rect(screen, theme.INK, (bx, by, _BAR_W, _BAR_H), 3, border_radius=11)
-    screen.blit(label_surf, label_surf.get_rect(center=(cx, by + 62)))
+        pygame.draw.rect(screen, (255, 225, 60), (bx, by, max(fill, _BAR_H), _BAR_H),
+                         border_radius=13)
 
 
 def run(screen: pygame.Surface, steps: list) -> BaseException | None:
     """steps: [(label, weight, callable)]. Returns the exception a step raised, if any."""
     scene = _static_scene()
-    font = theme.latin(34)
-    labels = [font.render(label, True, theme.INK_SOFT) for label, _, _ in steps]
     total = float(sum(w for _, w, _ in steps))
     clock = pygame.time.Clock()
 
     worker = _Worker(steps)
     worker.start()
-    shown = 0.0
+    shown, t = 0.0, 0.0
 
     while True:
         for ev in pygame.event.get():
@@ -94,9 +95,10 @@ def run(screen: pygame.Surface, steps: list) -> BaseException | None:
             target = (done + steps[i][1] * creep) / total
 
         dt = clock.tick(60) / 1000.0
+        t += dt
         shown = max(shown, shown + (target - shown) * min(1.0, dt * 7))
-        label = labels[min(worker.index, len(labels) - 1)]
-        _draw(screen, scene, min(shown, 1.0), label)
+        label = steps[min(worker.index, len(steps) - 1)][0]
+        _draw(screen, scene, min(shown, 1.0), label, t)
         pygame.display.flip()
 
         if worker.finished and shown > 0.995:

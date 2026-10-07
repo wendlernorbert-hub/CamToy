@@ -3,8 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [
     ("models", "models"),
-    ("assets/sfx", "assets/sfx"),
-    # one soundtrack only (the m4a duplicate is never loaded; the game picks the first file)
+    # the kung fu song is the only music file; everything else is composed in code
     ("assets/music/AgenChicken - Japanese DnB.ogg", "assets/music"),
 ]
 binaries, hiddenimports = [], []

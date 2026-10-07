@@ -11,7 +11,7 @@ import sys
 
 _NAME = re.compile(r"^_MEI\d+(_del)?$")
 # a file that only this game ships, so other PyInstaller programs' folders are never touched
-_MARKER = os.path.join("models", "selfie_segmenter.tflite")
+_MARKER = os.path.join("models", "pose_landmarker_lite.task")
 
 
 def remove_stale_temp_dirs() -> int:
