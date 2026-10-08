@@ -64,11 +64,14 @@ for cls in (KungFuGame, BubbleGame, AnimalGame, PizzaGame, CarGame):
     g.finish(3)
     step(g, P(), 1.5)
     check(g.state == "result", "result screen reached")
+    # the hands can only reach the area where the player is shown (the car shows them small)
+    s, vx, vy = getattr(g, "view", None) or (1.0, 0.0, 0.0)
+    rx, ry, rw, rh = vx * W, vy * H, s * W, s * H
     bx, by = g.btn_again.c
-    check(bx > W * 0.8 and by < H * 0.2, f"replay button is top right ({bx:.0f}, {by:.0f})")
+    check(bx > rx + rw * 0.8 and by < ry + rh * 0.25, f"replay button is top right of the reachable area ({bx:.0f}, {by:.0f})")
     check(bx < W - 2 * g.btn_again.r and by > g.btn_again.r + 8, "...and not squeezed into the very corner")
     hx, hy = g.home.c
-    check(hx < W * 0.1 and hy < H * 0.15, "home button is top left")
+    check(rx <= hx < rx + rw * 0.15 and ry <= hy < ry + rh * 0.2, f"home button is top left of the reachable area ({hx:.0f}, {hy:.0f})")
     # a hand held on the old bottom-centre spots does nothing
     for x in (W / 2 - 120, W / 2 + 120):
         step(g, P(hand=(x, H * 0.83)), 1.5)

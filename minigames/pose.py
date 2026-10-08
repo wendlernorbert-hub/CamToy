@@ -24,9 +24,11 @@ BONES = [("l_sh", "r_sh"), ("l_sh", "l_el"), ("l_el", "l_wr"),
 class Pose:
     """Landmarks (33x3: x, y normiert 0..1, Sichtbarkeit) plus Pixel-Geometrie."""
 
-    def __init__(self, lm, w, h):
+    def __init__(self, lm, w, h, slot=0):
         self.lm = lm
         self.w, self.h = w, h
+        self.slot = slot                 # stays the same for a person from frame to frame
+        self.all = [self]
         self._px = lm[:, :2].astype(np.float64) * np.array([w, h], dtype=np.float64)
 
     def vis(self, name):
@@ -64,6 +66,16 @@ class Pose:
                     pts.append(tuple(self.P(n)))
         return pts
 
+    def pointer_points(self, thr=0.35):
+        """One point per hand (index finger, else wrist) - for buttons that sit close together."""
+        pts = []
+        for s in "lr":
+            for part in ("idx", "wr"):
+                if self.vis(f"{s}_{part}") >= thr:
+                    pts.append(tuple(self.P(f"{s}_{part}")))
+                    break
+        return pts
+
     def named_hand_points(self, thr=0.35):
         d = {}
         for s in "lr":
@@ -97,6 +109,47 @@ class Pose:
         return eye_mid, hs, tilt
 
 
+class Players:
+    """Everyone in view (usually a child on a parent's lap).
+
+    Behaves like the main person's Pose for code that only looks at one body; the hand
+    helpers return the hands of everybody, so both people can hit, pop and press buttons.
+    `all` lists every Pose (each with its own .slot)."""
+
+    def __init__(self, poses):
+        self.all = poses
+        # main person: the one whose upper body is seen best, then the bigger one
+        self.main = max(poses, key=lambda p: (p.ok, p.shoulder_w() if p.ok else 0.0))
+
+    def __getattr__(self, name):
+        return getattr(self.main, name)
+
+    @property
+    def ok(self):
+        return any(p.ok for p in self.all)
+
+    def hand_points(self, thr=0.35):
+        return [pt for p in self.all for pt in p.hand_points(thr)]
+
+    def pointer_points(self, thr=0.35):
+        return [pt for p in self.all for pt in p.pointer_points(thr)]
+
+    def named_hand_points(self, thr=0.35):
+        d = {}
+        for p in self.all:
+            for n, v in p.named_hand_points(thr).items():
+                d[n if p.slot == 0 else f"{n}#{p.slot}"] = v
+        return d
+
+
+def make_players(people, w, h):
+    """people: [(slot, landmarks)] from the tracker -> Players, or None if nobody is there."""
+    poses = [Pose(lm, w, h, slot) for slot, lm in people]
+    if not poses:
+        return None
+    return poses[0] if len(poses) == 1 else Players(poses)
+
+
 # ---------------------------------------------------------------- Skelett ---
 
 SW2, HW2 = 0.11, 0.07            # halbe Schulter-/Hüftbreite
@@ -110,8 +163,6 @@ STAND = [-0.03, 0.31, 0.03, 0.31, -0.07, 0.0, 0.07, 0.0, 0.43]
 PRESETS = {
     "stand": STAND,
     "baum": [0.08, -0.325, -0.08, -0.325, -0.07, 0.0, 0.07, 0.0, 0.43],
-    "storch": [-0.27, 0.20, 0.27, 0.20, -0.07, 0.0, 0.10, 0.18, 0.43],
-    "storch_r": [-0.27, 0.20, 0.27, 0.20, -0.10, 0.18, 0.07, 0.0, 0.43],
     "frosch": [-0.05, 0.31, 0.05, 0.31, -0.16, 0.0, 0.16, 0.0, 0.22],
     "stern": [-0.23, -0.23, 0.23, -0.23, -0.20, 0.0, 0.20, 0.0, 0.39],
     "schmetterling": [-0.32, -0.02, 0.32, -0.02, -0.07, 0.0, 0.07, 0.0, 0.43],

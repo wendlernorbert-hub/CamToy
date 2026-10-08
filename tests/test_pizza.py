@@ -1,4 +1,6 @@
-"""Pizza game: pick a topping with a hand held on its bin, sprinkle it over the pizza, bake."""
+"""Pizza game: whole ingredients are made ready (knife / blender -> sauce / grater -> cheese),
+put on the plain dough (pieces, smeared sauce, sprinkled cheese), baked in the stone oven,
+sliced and eaten by a boy."""
 import os
 import sys
 import tempfile
@@ -11,7 +13,7 @@ import numpy as np  # noqa: E402
 import pygame  # noqa: E402
 
 from minigames.common import Ctx, Sounds, Speaker  # noqa: E402
-from minigames.pizza import KINDS, MAX_TOPPINGS, PizzaGame  # noqa: E402
+from minigames.pizza import BAKE_TIME, KINDS, MAX_TOPPINGS, PIECES, TOOL, WORK, PizzaGame  # noqa: E402
 from minigames.pose import LM, PRESETS, Pose, make_skeleton  # noqa: E402
 
 W, H = 1280, 720
@@ -33,27 +35,27 @@ class Tracker:
     def set_segmentation(self, on):
         pass
 
-    def latest(self):
-        return 0, np.zeros((480, 640, 3), np.uint8), None, None
-
 
 pygame.init()
 screen = pygame.display.set_mode((W, H))
 ctx = Ctx(W, H, Sounds(True), Speaker(), Tracker(), tempfile.mkdtemp())
 
 
-def P(hand=None, other=None):
-    """Standing pose with the right hand at `hand` and (optionally) the left at `other`."""
+def P(hand=None):
+    """Standing pose with the right hand at `hand` (the left hand hangs down, out of the way)."""
     lm = make_skeleton(PRESETS["stand"], aspect=W / H)
-    for names, pos in ((("r_wr", "r_idx"), hand), (("l_wr", "l_idx"), other)):
-        if pos:
-            for n in names:
-                lm[LM[n], 0], lm[LM[n], 1] = pos[0] / W, pos[1] / H
+    for n in ("l_wr", "l_idx"):
+        lm[LM[n], 2] = 0.0
+    for n in ("r_wr", "r_idx"):
+        if hand:
+            lm[LM[n], 0], lm[LM[n], 1] = hand[0] / W, hand[1] / H
+        else:
+            lm[LM[n], 2] = 0.0
     return Pose(lm, W, H)
 
 
 def step(g, pose, seconds, dt=1 / 30):
-    for _ in range(int(seconds / dt)):
+    for _ in range(int(round(seconds / dt))):
         g.update(dt, pose)
 
 
@@ -63,63 +65,175 @@ def shot(g, name, pose=None):
     pygame.image.save(screen, os.path.join(OUT, name + ".png"))
 
 
+def bin_of(g, kind):
+    return next(b for b in g.bins if b.kind == kind)
+
+
+def stroke(g, down=True):
+    """One fast stroke through the station (down: knife; down or up: grater)."""
+    sx, sy = g.station
+    for i in range(6):
+        g.update(1 / 30, P((sx, sy - 130 + i * 40) if down else (sx, sy + 70 - i * 40)))
+    for i in range(10):                     # move away slowly
+        g.update(1 / 30, P((sx + 260, sy + 40 - i * 4)))
+
+
+def take(g):
+    """Take the knife (or the piece of cheese) that lies at the station."""
+    tool = TOOL.get(g.item["kind"], "knife")
+    step(g, P(g._tool_rest(tool)), 0.1)
+
+
+def pick(g, kind):
+    step(g, P((W / 2, H * 0.95)), 0.3)
+    g.carry.clear()
+    step(g, P(bin_of(g, kind).c), 0.8)
+
+
+def put_piece(g, at):
+    sx, sy = g.station
+    step(g, P((sx, sy)), 0.1)                        # touch the bowl: a piece sticks to the hand
+    for i in range(12):                               # carry it over to the pizza
+        g.update(1 / 30, P((sx + (at[0] - sx) * i / 11, sy + (at[1] - sy) * i / 11)))
+    step(g, P(at), 0.6)                               # hold still: it is put down
+
+
+def sweep(g, rounds=2):
+    """Take from the bowl, then move the hand around over the pizza."""
+    sx, sy = g.station
+    step(g, P((sx, sy)), 0.1)
+    cx, cy = g.center
+    for i in range(int(rounds * 60)):
+        a = i / 60 * 6.28
+        g.update(1 / 30, P((cx + np.cos(a * 1.3) * 110, cy + np.sin(a) * 110)))
+
+
 g = PizzaGame(ctx)
 step(g, P(), 3.0)
 check(g.state == "play", "intro leads into play")
+check(g.sauce_dabs == 0 and not g.toppings, "the pizza starts as plain dough (no sauce)")
 
-print("pick + sprinkle")
-salami = g.bins[0]
-step(g, P(hand=salami.c), 0.3)
-check(g.held is None, "short touch does not pick yet")
-step(g, P(hand=salami.c), 0.4)
-check(g.held and g.held["kind"] == "salami", "hand held 0.5 s on the bin picks the topping")
+print("salami: knife")
+sal = bin_of(g, "salami")
+step(g, P(sal.c), 0.3)
+check(g.item is None, "short touch does not pick yet")
+step(g, P(sal.c), 0.5)
+check(g.item and g.item["kind"] == "salami" and g.item["work"] == 0, "hand held on the bin puts the whole salami on the board")
+shot(g, "pizza_whole", P(sal.c))
+step(g, P(g.station), 1.0)
+check(g.item["work"] == 0, "a hand resting on the board does not cut")
+stroke(g)
+stroke(g)
+check(g.item["work"] == 0 and g.tool_hand is None, "chopping with an empty hand does nothing: take the knife first")
+take(g)
+check(g.tool_hand is not None, "the hand took the knife")
+for _ in range(WORK["knife"] - 1):
+    stroke(g)
+check(g.item and g.item["work"] == WORK["knife"] - 1, f"each downward stroke is one cut ({g.item and g.item['work']})")
+shot(g, "pizza_cutting")
+stroke(g)
+check(g.item is None and g.bowl and g.bowl["mode"] == "piece" and g.bowl["left"] == PIECES and not g.carry,
+      "after the last cut the slices are in the bowl (and the cutting hand did not grab one)")
+step(g, P(), 0.8)
 cx, cy = g.center
-for i in range(60):                    # sweep the hand across the pizza
-    g.update(1 / 30, P(hand=(cx - 120 + i * 4, cy - 30 + (i % 7) * 10)))
-n_after = len(g.toppings)
-check(n_after == 4 and g.held is None, f"one pick sprinkles 4 pieces ({n_after})")
-step(g, P(hand=(cx, cy)), 1.0)
-check(len(g.toppings) == n_after, "hand over the pizza without a pick adds nothing")
+step(g, P((cx - 60, cy)), 0.6)
+check(not g.toppings, "a hand over the pizza without a piece puts nothing down")
+put_piece(g, (cx - 60, cy - 20))
+check(len(g.toppings) == 1 and not g.carry, f"piece carried over and put down by holding still ({len(g.toppings)})")
+put_piece(g, (cx + 50, cy + 30))
+check(len(g.toppings) == 2 and g.bowl["left"] == PIECES - 2, "one piece per trip")
 
-print("hand outside the pizza")
-mush = g.bins[1]
-step(g, P(hand=mush.c), 0.8)
-check(g.held and g.held["kind"] == "mushroom", "second topping picked")
-step(g, P(hand=(g.W * 0.25, g.H * 0.5)), 1.5)
-check(len(g.toppings) == n_after and g.held, "outside the pizza nothing is dropped, topping stays in hand")
+print("a hand that still holds something can pick a new ingredient (play-test bug)")
+sx, sy = g.station
+step(g, P((sx, sy)), 0.1)                            # take a salami slice ...
+check(bool(g.carry), "the hand holds a slice")
+step(g, P(bin_of(g, "tomato").c), 0.8)                # ... and go straight to the tomatoes
+check(g.item and g.item["kind"] == "tomato" and not g.carry, "the full hand picked the tomatoes")
 
-print("all kinds, then bake")
-for i, b in enumerate(g.bins):
-    g.held = None
-    step(g, P(hand=(g.W * 0.5, g.H * 0.95)), 0.2)         # leave every bin first
-    step(g, P(hand=b.c), 0.8)
-    for k in range(40):
-        g.update(1 / 30, P(hand=(cx - 100 + k * 5, cy + (k % 5) * 14 - 30)))
-check(len({t[0] for t in g.toppings}) == len(KINDS), f"all {len(KINDS)} kinds placed ({len(g.toppings)} pieces)")
+print("tomato: the blender makes sauce by itself")
+pick(g, "tomato")
+check(g.item and g.item["kind"] == "tomato", "tomatoes picked")
+step(g, P(), 0.8)
+check(g.item is not None, "the blender is still running")
+step(g, P(), 1.0)
+check(g.bowl and g.bowl["mode"] == "sauce", "without any hand motion the tomatoes become a pot of sauce")
+shot(g, "pizza_sauce_pot")
+step(g, P(), 0.8)
+sweep(g)
+check(g.sauce_dabs > 20 and g.sauce_coverage() > 0.15,
+      f"moving the hand over the pizza smears sauce ({g.sauce_dabs} dabs, {g.sauce_coverage():.0%} covered)")
+for i in range(400):                                   # keep going, in a spiral: one pot covers it all
+    a, rad = i * 0.25, 10 + 140 * (i % 200) / 200
+    g.update(1 / 30, P((cx + np.cos(a) * rad, cy + np.sin(a) * rad)))
+check(g.sauce_coverage() > 0.85, f"one pot of sauce is enough for the whole pizza ({g.sauce_coverage():.0%})")
+shot(g, "pizza_sauced")
+
+print("cheese: grater")
+pick(g, "cheese")
+take(g)
+check(g.tool_hand is not None, "the hand took the piece of cheese")
+for i in range(WORK["grater"]):
+    stroke(g, down=i % 2 == 0)
+check(g.bowl and g.bowl["mode"] == "cheese", "rubbing up and down on the grater gives grated cheese")
+step(g, P(), 0.8)
+n0 = len(g.toppings)
+sweep(g, 1)
+check(len(g.toppings) > n0 + 6, f"cheese is sprinkled where the hand moves ({len(g.toppings) - n0} bits)")
+
+print("mushrooms: knife")
+check(set(KINDS) == {"tomato", "cheese", "salami", "mushroom"}, f"for now just 4 ingredients ({KINDS})")
+pick(g, "mushroom")
+take(g)
+for _ in range(WORK["knife"] - 1):
+    stroke(g)
+shot(g, "pizza_cutting_mushroom")
+stroke(g)
+step(g, P(), 0.8)
+for k in range(3):
+    put_piece(g, (cx - 80 + k * 80, cy + 60))
+check({t[0] for t in g.toppings} == {"salami", "cheese", "mushroom"}, f"salami, cheese and mushrooms on the pizza ({sorted({t[0] for t in g.toppings})}, item={g.item}, bowl={g.bowl and g.bowl['mode']})")
 shot(g, "pizza_decorated")
-step(g, P(hand=g.oven.c), 1.5)
-check(g.phase == "bake", "oven button starts baking")
+
+print("no automatic oven, then into the oven, bake, slice, eat")
+step(g, P((W / 2, H * 0.95)), 200)
+check(g.phase == "decorate", "the oven never comes by itself - only with the button")
+step(g, P(g.oven.c), 1.5)
+check(g.phase == "to_oven", "oven button (top right, like 'play again'): the stone oven comes")
+step(g, P(), 0.8)
+(px, py), _ = g._pizza_pos()
+step(g, P((px, py)), 0.2)                            # one touch ...
+step(g, P(), 1.2)                                    # ... and it slides in by itself
+check(g.phase == "bake", f"one touch on the pizza slides it into the oven ({g.phase})")
+step(g, P(), BAKE_TIME / 2)
 shot(g, "pizza_bake")
+step(g, P(), BAKE_TIME / 2 + 0.1)
+check(g.phase == "out", "after baking the pizza comes out")
+step(g, P(), 1.1)
+check(g.phase == "slice", "then it is cut into slices")
+step(g, P(), 0.75)
+shot(g, "pizza_cutter")
+step(g, P(), 1.65)
+check(g.phase == "eat", "then the customer comes")
+step(g, P(), 1.7)
+shot(g, "pizza_eat")
+step(g, P(), 1.2)
+shot(g, "pizza_yum")
+check(g.eaten == 1, "the customer takes one slice")
 step(g, P(), 3.0)
-check(g.state == "result" and g.stars >= 3, f"result with stars ({g.stars})")
+check(g.state == "result" and g.stars >= 3, f"result with stars ({g.state}, {g.stars})")
 step(g, P(), 1.0)
 shot(g, "pizza_result")
 
 print("limits and edge cases")
 g2 = PizzaGame(ctx)
 step(g2, P(), 3.0)
-step(g2, P(hand=g2.oven.c), 2.0)
+step(g2, P(g2.oven.c), 2.0)
 check(g2.phase == "decorate", "oven with an empty pizza does nothing")
 for _ in range(MAX_TOPPINGS + 20):
     g2._place("olive", (g2.center[0], g2.center[1]))
 check(len(g2.toppings) == MAX_TOPPINGS, f"topping count is capped at {MAX_TOPPINGS}")
-g3 = PizzaGame(ctx)
-step(g3, P(), 3.0)
-g3._place("cheese", g3.center)
-step(g3, P(), 95.0)
-check(g3.state == "result", "round bakes by itself after the time limit")
-g3.restart()
-check(g3.state == "intro" and not g3.toppings, "restart gives a fresh pizza")
+g2.restart()
+check(g2.state == "intro" and not g2.toppings, "restart gives a fresh pizza")
 
 print("\n%d Fehler" % len(FAILS))
 sys.exit(1 if FAILS else 0)

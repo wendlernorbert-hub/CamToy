@@ -107,7 +107,7 @@ def step(game, pose, seconds, dt=1 / 30):
 
 # ------------------------------------------------------------ Aufgaben ---
 print("Aufgaben-Erkennung")
-HOLDS = {"baum": "baum", "storch": "storch", "schmetterling": "schmetterling", "hase": "hase"}
+HOLDS = {"baum": "baum", "hase": "hase"}
 for lv in (1, 2, 3):
     for key, preset in HOLDS.items():
         task = make_task(key, lv)
@@ -120,13 +120,13 @@ for lv in (1, 2, 3):
     # Verwechslungen: Pose A darf Aufgabe B nicht lösen
     for key in HOLDS:
         for other, preset in HOLDS.items():
-            if other == key or (key, other) in (("storch", "baum"),):
+            if other == key:
                 continue
             task = make_task(key, lv)
             pose = P(PRESETS[preset])
             m = Measures(pose)
             hit = any(task.update(pose, m, 1 / 30)[1] for _ in range(5))
-            if hit and key != "storch":
+            if hit:
                 check(False, f"Level {lv}: Pose '{preset}' löst fälschlich '{key}' aus")
     for key in HOLDS:
         task = make_task(key, lv)
@@ -153,6 +153,81 @@ for lv in (1, 2, 3):
         for i in range(150):
             t2.update(P(STAND), Measures(P(STAND)), 1 / 30)
         check(t2.count == 0, f"Level {lv}: {key} zählt nichts beim Stehen")
+    # Stern, wenn die hängenden Hände unten aus dem Bild sind (dann sind sie "unsichtbar")
+    task = make_task("stern", lv)
+    t = 0.0
+    for i in range(int(task.need * 2.6 * 30) + 60):
+        t += 1 / 30
+        k = 0.5 - 0.5 * math.cos(2 * math.pi * t / 1.8)
+        p = P([a + (b - a) * k for a, b in zip(STAND, PRESETS["stern"])])
+        if k < 0.3:
+            for n in ("l_wr", "r_wr", "l_idx", "r_idx"):
+                p.lm[LM[n], 2] = 0.05
+        task.update(p, Measures(p), 1 / 30)
+    check(task.progress >= 1.0, f"Level {lv}: Stern zählt mit Händen unten außerhalb des Bildes ({task.count})")
+    # ... and when the raised hands are out of the picture at the top (sitting close to the camera)
+    task = make_task("stern", lv)
+    t = 0.0
+    for i in range(int(task.need * 2.6 * 30) + 60):
+        t += 1 / 30
+        k = 0.5 - 0.5 * math.cos(2 * math.pi * t / 1.8)
+        p = P([a + (b - a) * k for a, b in zip(STAND, PRESETS["stern"])])
+        for n in ("l_wr", "r_wr", "l_idx", "r_idx"):
+            if k < 0.3 or k > 0.6:
+                p.lm[LM[n], 2] = 0.05
+        task.update(p, Measures(p), 1 / 30)
+    check(task.progress >= 1.0, f"Level {lv}: Stern zählt mit Händen oben außerhalb des Bildes ({task.count})")
+    # Schmetterling: wings flap up and down (holding still does not count)
+    task = make_task("schmetterling", lv)
+    for i in range(int(task.need * 0.9 * 30) + 60):
+        p = P(trainer_vec("schmetterling", i / 30))
+        task.update(p, Measures(p), 1 / 30)
+    check(task.progress >= 1.0, f"Level {lv}: Schmetterling-Flattern zählt ({task.count}/{task.need})")
+    task = make_task("schmetterling", lv)
+    for i in range(300):
+        p = P(PRESETS["schmetterling"])
+        task.update(p, Measures(p), 1 / 30)
+    check(task.count <= 1, f"Level {lv}: Arme nur seitlich halten ist kein Flattern ({task.count})")
+    if lv == 1:                                     # tolerance for small children (play-test)
+        task = make_task("frosch", lv)
+        for i in range(int(task.need * 1.8 * 30) + 60):
+            k = 0.45 * (0.5 - 0.5 * math.cos(2 * math.pi * i / 30 / 1.8))
+            p = P([a + (b - a) * k for a, b in zip(STAND, PRESETS["frosch"])])
+            task.update(p, Measures(p), 1 / 30)
+        check(task.progress >= 1.0, f"Level 1: kleine Kniebeugen (45 %) zählen ({task.count}/{task.need})")
+        task = make_task("schmetterling", lv)
+        for i in range(int(task.need * 1.2 * 30) + 60):
+            k = 0.5 - 0.5 * math.cos(2 * math.pi * i / 30 / 1.2)       # arms: hanging <-> sideways
+            p = P([a + (b - a) * k for a, b in zip(STAND, PRESETS["schmetterling"])])
+            task.update(p, Measures(p), 1 / 30)
+        check(task.progress >= 1.0, f"Level 1: Flattern unterhalb der Schultern zählt ({task.count}/{task.need})")
+    # Windmühle, wenn die Hände oben aus dem Bild gehen (dann zählt der Ellbogen)
+    task = make_task("windmuehle", lv)
+    for i in range(int(8 * 30)):
+        p = P(trainer_vec("windmuehle", i / 30))
+        for s in "lr":
+            if p.P(f"{s}_wr")[1] < p.P(f"{s}_sh")[1]:
+                for n in (f"{s}_wr", f"{s}_idx"):
+                    p.lm[LM[n], 2] = 0.05
+        task.update(p, Measures(p), 1 / 30)
+    check(task.progress >= 1.0, f"Level {lv}: Windmühle mit Händen oben außerhalb des Bildes ({task.progress:.2f})")
+    # Kniebeuge, wenn nur der Oberkörper im Bild ist (Hüften/Beine unsichtbar)
+    task = make_task("frosch", lv)
+
+    def upper(vec):
+        p = P(vec)
+        for n in ("l_hip", "r_hip", "l_kn", "r_kn", "l_an", "r_an"):
+            p.lm[LM[n], 2] = 0.05
+        return p
+    for i in range(30):
+        task.update(upper(STAND), Measures(upper(STAND)), 1 / 30)
+    t = 0.0
+    for i in range(int(task.need * 2.6 * 30) + 60):
+        t += 1 / 30
+        k = 0.5 - 0.5 * math.cos(2 * math.pi * t / 1.8)
+        p = upper([a + (b - a) * k for a, b in zip(STAND, PRESETS["frosch"])])
+        task.update(p, Measures(p), 1 / 30)
+    check(task.progress >= 1.0, f"Level {lv}: Kniebeuge nur mit Oberkörper ({task.count}/{task.need})")
     task = make_task("windmuehle", lv)
     for i in range(int(8 * 30)):
         p = P(trainer_vec("windmuehle", i / 30))
@@ -168,24 +243,52 @@ print("Seifenblasen")
 for lv in (1, 3):
     ctx.level = lv
     g = BubbleGame(ctx)
-    step(g, P(STAND), 3.0)
-    check(g.state == "play", "Intro geht ins Spiel über")
+    check(g.state == "play", "freies Spiel: kein Intro, keine Runde")
     step(g, P(STAND), 4.0)
     for _ in range(40):
-        if not g.bubbles:
+        inside = [b for b in g.bubbles if 0 < b.x < W and 0 < b.y < H]
+        if not inside:
             step(g, P(STAND), 0.3)
             continue
-        b = g.bubbles[0]
+        b = inside[0]
         g.update(1 / 30, P(STAND, hand=(b.x, b.y)))
     check(g.score >= 5, f"Level {lv}: Blasen platzen mit Hand (Score {g.score})")
-    step(g, P(STAND), g.DURATION)
-    check(g.state == "result" and g.stars >= 1, f"Level {lv}: Runde endet mit Ergebnis ({g.stars} Sterne)")
+    # chaotic flight: they come from several sides, in many sizes, and stay a while
+    seen_r, sides = set(), set()
+    for _ in range(int(40 * 30)):
+        n0 = len(g.bubbles)
+        g.update(1 / 30, P(STAND))
+        for b in g.bubbles[n0:] if len(g.bubbles) > n0 else []:
+            sides.add("unten" if b.y > H else ("links" if b.x < 0 else "rechts"))
+            seen_r.add(int(b.r) // 10)
+    check(sides == {"unten", "links", "rechts"}, f"Level {lv}: Blasen kommen von unten und den Seiten {sides}")
+    check(len(seen_r) >= 5, f"Level {lv}: viele verschiedene Größen ({sorted(seen_r)})")
+    check(g.state == "play" and len(g.bubbles) >= 3, f"Level {lv}: endloses Spiel, Blasen im Bild ({len(g.bubbles)})")
 ctx.level = 1
+from minigames.bubbles import GIANT_R, TINY_R  # noqa: E402
+g = BubbleGame(ctx)
+sizes = []
+for _ in range(400):
+    g.spawn()
+    sizes.append(g.bubbles[-1].r)
+    if g.bubbles[-1].r >= GIANT_R[0]:
+        g.bubbles.pop()                                  # (only one giant at a time is allowed)
+check(any(r <= TINY_R[1] for r in sizes) and any(r >= GIANT_R[0] for r in sizes),
+      f"now and then tiny and giant bubbles ({min(sizes):.0f}..{max(sizes):.0f} px)")
+g = BubbleGame(ctx)
+g.spawn()
+giant = g.bubbles[-1]
+giant.r = GIANT_R[0] + 5
+n = len(g.bubbles)
+played = []
+g.ctx.play = lambda name, _orig=g.ctx.play: (played.append(name), _orig(name))
+g.pop(giant)
+check(3 <= len(g.bubbles) - (n - 1) <= 5 and played[-1] == "pop_giant",
+      f"a giant pops deep and bursts into 3-5 little bubbles ({len(g.bubbles) - (n - 1)}, {played})")
+del g.ctx.play
 g = BubbleGame(ctx)
 step(g, P(STAND), 9.0)
 shot(g, P(STAND, hand=(480, 300)), "bubbles")
-step(g, P(STAND), 40)
-shot(g, P(STAND), "bubbles_result")
 
 # ------------------------------------------------------------ Kung-Fu ---
 print("Kung-Fu")
@@ -232,6 +335,27 @@ for i, tile in enumerate(g.tiles):
         g.update(1 / 30, P(STAND, hand=tile.c))
     step(g, P(STAND), 0.3)
 check(all(v == 1 for v in g.sel.values()), f"Jede Kachel schaltet ein Teil weiter {g.sel}")
+# every round the pieces come in a new order (play-test wish: not always the same first hat)
+from minigames.dressup import SLOTS  # noqa: E402
+firsts = {key: set() for key, _ in SLOTS}
+for _ in range(12):
+    gr = DressUpGame(ctx)
+    for key, items in SLOTS:
+        firsts[key].add(gr.order[key][1])
+        check(gr.order[key][0] is None and sorted(gr.order[key][1:]) == sorted(items[1:]),
+              f"{key}: 'nothing' first, then every piece exactly once") if _ == 0 else None
+check(all(len(v) > 1 for v in firsts.values()), f"the first piece changes from round to round ({ {k: len(v) for k, v in firsts.items()} })")
+# wrist on one tile, finger on the neighbour tile: only one thing may change (play-test bug)
+g2 = DressUpGame(ctx)
+a, b = g2.tiles[0], g2.tiles[1]
+for _ in range(60):
+    p = P(STAND)
+    p.lm[LM["r_wr"], 0], p.lm[LM["r_wr"], 1] = a.c[0] / W, a.c[1] / H
+    p.lm[LM["r_idx"], 0], p.lm[LM["r_idx"], 1] = b.c[0] / W, b.c[1] / H
+    p = Pose(p.lm, W, H)
+    g2.update(1 / 30, p)
+changed = [k for k, v in g2.sel.items() if v]
+check(len(changed) == 1, f"Handgelenk + Finger auf zwei Kacheln: nur eine Auswahl ({changed})")
 step(g, P(STAND), 0.5)
 shot(g, P(STAND), "dressup1")
 for i, tile in enumerate(g.tiles):
@@ -255,7 +379,7 @@ check(len(fotos) == 1, f"Foto gespeichert ({fotos})")
 
 # ------------------------------------------------------------ Tier-Yoga ---
 print("Tier-Yoga")
-PRES = {"baum": "baum", "storch": "storch", "frosch": "frosch", "stern": "stern",
+PRES = {"baum": "baum", "frosch": "frosch", "stern": "stern",
         "schmetterling": "schmetterling", "hase": "hase", "windmuehle": "stand"}
 for lv in (1, 2, 3):
     ctx.level = lv
@@ -272,8 +396,8 @@ for lv in (1, 2, 3):
         elif key in ("frosch", "stern"):
             k = 0.5 - 0.5 * math.cos(2 * math.pi * t_sim / 1.8)
             p = P([a + (b - a) * k for a, b in zip(STAND, PRESETS[PRES[key]])])
-        elif key == "windmuehle":
-            p = P(trainer_vec("windmuehle", t_sim))
+        elif key in ("windmuehle", "schmetterling"):
+            p = P(trainer_vec(key, t_sim))
         else:
             p = P(PRESETS[PRES[key]])
         g.update(1 / 30, p)
@@ -281,11 +405,11 @@ for lv in (1, 2, 3):
           f"Level {lv}: alle 5 Tiere geschafft ({g.earned}), Sterne {g.stars}")
 ctx.level = 1
 g = AnimalGame(ctx)
-g.order[0] = "storch"
+g.order[0] = "baum"
 g.begin_task()
 step(g, P(STAND), 2.5)
-step(g, P(PRESETS["storch"]), 0.8)
-shot(g, P(PRESETS["storch"]), "animals_storch")
+step(g, P(PRESETS["baum"]), 0.8)
+shot(g, P(PRESETS["baum"]), "animals_baum")
 g = AnimalGame(ctx)
 g.order[0] = "windmuehle"
 g.begin_task()
@@ -298,30 +422,31 @@ g.earned = [3, 3, 2, 3, 1]
 step(g, P(STAND), 2.5)
 shot(g, P(STAND), "animals_result")
 
-# Zeitlimit: nach 10 Sekunden "fehlgeschlagen", dann kommt die nächste Figur
+# Zeitlimit (Stufe 1: 14 s): danach "fehlgeschlagen", dann kommt die nächste Figur
 print("Tier-Yoga Zeitlimit")
 ctx.level = 1
+LIM = animals.TIMEOUT[1]
 g = AnimalGame(ctx)
 step(g, P(STAND), 3.0)                          # Intro
 step(g, P(STAND), 2.4)                          # Tier wird vorgemacht
-check(g.phase == "do" and animals.TIMEOUT[1] == 10.0, "Aufgabe läuft, Limit ist 10 s")
-step(g, P(STAND), 9.0)
-check(g.phase == "do" and not g.earned, "nach 9 s ist noch alles offen")
+check(g.phase == "do", f"Aufgabe läuft, Limit ist {LIM:.0f} s")
+step(g, P(STAND), LIM - 1)
+check(g.phase == "do" and not g.earned, f"nach {LIM - 1:.0f} s ist noch alles offen")
 step(g, P(STAND), 1.5)
-check(g.phase == "cheer" and g.earned == [0], f"nach 10 s fehlgeschlagen ({g.earned})")
+check(g.phase == "cheer" and g.earned == [0], f"nach {LIM:.0f} s fehlgeschlagen ({g.earned})")
 g.draw(screen, P(STAND))
 pygame.image.save(screen, os.path.join(OUT, "animals_failed.png"))
 step(g, P(STAND), 2.0)
 check(g.idx == 1 and g.phase == "show", "die nächste Figur kommt")
 for _ in range(4):                              # restliche Figuren ebenfalls nicht schaffen
-    step(g, P(STAND), 14.5)
+    step(g, P(STAND), LIM + 4.5)
 check(g.state == "result" and g.earned == [0] * 5 and g.stars == 1,
       f"nichts geschafft: Runde endet trotzdem mit Ergebnis ({g.earned}, {g.stars} Stern)")
 for lv in (2, 3):
     ctx.level = lv
     g = AnimalGame(ctx)
-    step(g, P(STAND), 3.0 + 2.4 + 10.5)
-    check(g.earned == [0], f"Level {lv}: ebenfalls 10 s Limit")
+    step(g, P(STAND), 3.0 + 2.4 + animals.TIMEOUT[lv] + 0.5)
+    check(g.earned == [0], f"Level {lv}: Limit {animals.TIMEOUT[lv]:.0f} s")
 ctx.level = 1
 
 # Menü
@@ -333,6 +458,27 @@ sel = None
 for _ in range(60):
     sel = menu.update(1 / 30, P(STAND, hand=menu.tiles[2].c)) or sel
 check(sel == 2, "Menü: Hand auf Kachel wählt das Spiel")
+# play-test bug: two games at once. Wrist on one tile + finger on the next, and both hands on two tiles.
+for name, spots in (("Handgelenk/Finger", {"r_wr": 0, "r_idx": 1}),
+                    ("zwei Hände", {"r_wr": 3, "r_idx": 3, "l_wr": 4, "l_idx": 4})):
+    menu = Menu(ctx, [(g.title, g.icon) for g in (KungFuGame, BubbleGame, AnimalGame, DressUpGame, PizzaGame)])
+    picks = []
+    for _ in range(90):
+        p = P(STAND)
+        for n, i in spots.items():
+            p.lm[LM[n], 0], p.lm[LM[n], 1] = menu.tiles[i].c[0] / W, menu.tiles[i].c[1] / H
+        s = menu.update(1 / 30, Pose(p.lm, W, H))
+        if s is not None:
+            picks.append(s)
+            break
+    others = [t.progress for i, t in enumerate(menu.tiles) if picks and i != picks[0]]
+    check(len(picks) == 1 and max(others or [0]) < 0.5,
+          f"Menü ({name}): genau ein Spiel, keine zweite Kachel lädt mit ({picks}, {others})")
+menu.pause()
+s = None
+for _ in range(90):
+    s = menu.update(1 / 30, P(STAND, hand=menu.tiles[1].c)) or s
+check(s is None, "Menü nach der Rückkehr: Hand, die schon auf einer Kachel liegt, startet nichts")
 
 # Trainer-Figuren als Übersicht
 sheet = pygame.Surface((W, 330))

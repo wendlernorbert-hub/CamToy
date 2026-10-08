@@ -10,9 +10,10 @@ import random
 import numpy as np
 import pygame
 
-from .common import (Game, circle_alpha, draw_ring, draw_star, draw_stars_row, ellipse_pts,
-                    ease_out_back, text)
-from .pose import BONES, PRESETS, draw_figure, lerp_vec, make_skeleton
+import gfx
+from .common import (Game, button_sprite, draw_star, draw_stars_row, draw_timer, ease_out_back,
+                     ellipse_pts, progress_ring, star_sprite)
+from .pose import PRESETS, draw_figure, lerp_vec, make_skeleton
 
 # ---------------------------------------------------------------- Tier-Bilder ---
 
@@ -31,18 +32,6 @@ def pic_baum(surf, c, r, t):
         pygame.draw.circle(surf, (60, 160, 70), (int(x + dx * r), int(y + dy * r)), int(k * r))
     for dx, dy in ((-.2, -.4), (.3, -.15), (-.35, .0), (.1, -.62)):
         pygame.draw.circle(surf, (230, 60, 60), (int(x + dx * r), int(y + dy * r)), int(.09 * r))
-
-
-def pic_storch(surf, c, r, t):
-    x, y = c
-    for dx, bend in ((-.05, 0), (.12, .12)):
-        pygame.draw.line(surf, (230, 70, 60), (x + dx * r, y + .3 * r), (x + (dx + bend) * r, y + .95 * r), max(3, int(r * .06)))
-    _el(surf, (252, 252, 255), (x - .1 * r, y + .02 * r), .52 * r, .3 * r, -.15, (150, 160, 190))
-    pygame.draw.line(surf, (252, 252, 255), (x + .28 * r, y - .05 * r), (x + .42 * r, y - .55 * r), max(4, int(r * .15)))
-    pygame.draw.circle(surf, (252, 252, 255), (int(x + .45 * r), int(y - .62 * r)), int(.15 * r))
-    pygame.draw.polygon(surf, (255, 150, 30), [(x + .56 * r, y - .7 * r), (x + 1.1 * r, y - .6 * r), (x + .56 * r, y - .55 * r)])
-    pygame.draw.circle(surf, (20, 20, 30), (int(x + .5 * r), int(y - .66 * r)), max(2, int(.03 * r)))
-    _el(surf, (40, 45, 70), (x - .3 * r, y + .0 * r), .32 * r, .15 * r, -.2)
 
 
 def pic_frosch(surf, c, r, t):
@@ -105,7 +94,8 @@ def pic_windmuehle(surf, c, r, t):
 
 HOLD = {1: 1.6, 2: 2.2, 3: 3.0}
 REPS = {1: 2, 2: 3, 3: 4}
-TIMEOUT = {1: 10.0, 2: 10.0, 3: 10.0}      # seconds per animal, then "failed" and on to the next
+FLAPS = {1: 3, 2: 5, 3: 6}                 # butterfly wing beats
+TIMEOUT = {1: 18.0, 2: 14.0, 3: 11.0}      # seconds per animal, then "failed" and on to the next
 
 
 class Measures:
@@ -113,8 +103,10 @@ class Measures:
 
     def __init__(self, pose):
         self.pose = pose
-        self.T = max(pose.torso(), 1.0)
         self.SW = max(pose.shoulder_w(), 1.0)
+        # body unit from the shoulders only: sitting close to the camera, the hips are usually out of
+        # view or detected in the wrong place, which made every threshold wrong (play-test: Stern)
+        self.T = 1.4 * self.SW
         self.arm = {}
         self.wr = {}
         for s, sign in (("l", -1), ("r", 1)):
@@ -128,6 +120,34 @@ class Measures:
     @property
     def both(self):
         return self.arm["l"] is not None and self.arm["r"] is not None
+
+    # Close to the camera, raised hands leave the picture at the top. Then the elbow decides.
+    def arm_up(self, s, thr):
+        """Hand at least -thr torso lengths above the shoulder (or, hand unseen, elbow raised)."""
+        p, sh = self.pose, self.pose.P(f"{s}_sh")
+        if p.vis(f"{s}_wr") >= 0.4:
+            return (p.P(f"{s}_wr")[1] - sh[1]) / self.T < thr
+        if p.vis(f"{s}_el") >= 0.4:
+            return (p.P(f"{s}_el")[1] - sh[1]) / self.T < min(0.0, thr * 0.5)
+        return False
+
+    def arm_down(self, s):
+        """Hand clearly below the shoulder - or out of the picture at the bottom."""
+        p, sh = self.pose, self.pose.P(f"{s}_sh")
+        if p.vis(f"{s}_wr") >= 0.4:
+            return (p.P(f"{s}_wr")[1] - sh[1]) / self.T > 0.15
+        return p.vis(f"{s}_el") < 0.4 or (p.P(f"{s}_el")[1] - sh[1]) / self.T > 0.1
+
+    def arm_vec(self, s):
+        """Shoulder -> hand in torso lengths, or None. Hand out of view: estimated from the elbow
+        (a stretched arm reaches about twice as far as the elbow)."""
+        p = self.pose
+        for j, min_len, k in (("wr", 0.4, 1.0), ("el", 0.22, 1.9)):
+            if p.vis(f"{s}_{j}") >= 0.4:
+                v = (p.P(f"{s}_{j}") - p.P(f"{s}_sh")) / self.T
+                if float(np.hypot(*v)) >= min_len:
+                    return v * k
+        return None
 
 
 class HoldTask:
@@ -160,14 +180,6 @@ def chk_baum(m, pose, lv):
             and abs(m.wr["l"][0] - m.wr["r"][0]) < spread * m.SW)
 
 
-def chk_schmetterling(m, pose, lv):
-    if not m.both:
-        return False
-    ox = {1: 0.55, 2: 0.7, 3: 0.8}[lv]
-    oy = {1: 0.5, 2: 0.4, 3: 0.3}[lv]
-    return all(m.arm[s][0] > ox and abs(m.arm[s][1]) < oy for s in "lr")
-
-
 def chk_hase(m, pose, lv):
     if not m.both or not pose.has("nose", "l_eye", "r_eye", thr=0.4):
         return False
@@ -182,12 +194,33 @@ def chk_hase(m, pose, lv):
     return True
 
 
-def chk_storch(m, pose, lv):
-    leg = float(np.linalg.norm(pose.mid("l_hip", "r_hip") - pose.mid("l_an", "r_an")))
-    if leg < 1:
+class Bob:
+    """Counts up-and-down movements of one value (screen y, bigger = lower), relative to where
+    it just was - not to a fixed height, so it does not matter how high someone sits or stands.
+    A rep = down by at least `down` from the last high point, then up again by `up`."""
+
+    def __init__(self, down, up):
+        self.down, self.up = down, up
+        self.state, self.top, self.bottom = "up", None, None
+        self.depth = 0.0                      # 0..1 how far the current move down has come
+
+    def update(self, v):
+        """Returns True when a full down-and-up was completed."""
+        if self.top is None:
+            self.top = self.bottom = v
+            return False
+        if self.state == "up":
+            self.top = min(self.top, v)
+            self.depth = min(1.0, max(0.0, (v - self.top) / self.down))
+            if v - self.top >= self.down:
+                self.state, self.bottom = "down", v
+            return False
+        self.bottom = max(self.bottom, v)
+        self.depth = 1.0
+        if self.bottom - v >= self.up:
+            self.state, self.top = "up", v
+            return True
         return False
-    lift = abs(pose.P("l_an")[1] - pose.P("r_an")[1]) / leg
-    return lift > {1: 0.12, 2: 0.16, 3: 0.22}[lv]
 
 
 class RepTask:
@@ -195,11 +228,11 @@ class RepTask:
 
     def __init__(self, key, level):
         self.key, self.level = key, level
-        self.need = REPS[level]
+        self.need = FLAPS[level] if key == "schmetterling" else REPS[level]
         self.count, self.match = 0, False
         self.progress = 0.0
         self.state = None
-        self.buf, self.base = [], None
+        self.bob, self.sw, self.last_y = None, None, None
         self.timer = 0.0
         self.idle = 0.0
         self.acc = {"l": 0.0, "r": 0.0}
@@ -209,80 +242,86 @@ class RepTask:
         getattr(self, "_" + self.key)(pose, m, dt)
         return self.progress, self.match, False
 
-    def _frosch(self, pose, m, dt):             # Kniebeuge (nur Oberkörper nötig)
-        sy = float(pose.mid("l_sh", "r_sh")[1])
-        self.timer += dt
-        if self.base is None:
-            self.buf.append((sy, m.T))
-            if self.timer > 0.8:
-                ys, ts = zip(*self.buf)
-                self.base = (float(np.median(ys)), float(np.median(ts)))
-                self.state = "up"
-            return
-        by, bt = self.base
-        drop = (sy - by) / bt
-        if drop < -0.05:
-            self.base = (by + (sy - by) * 0.2, bt)
-        down = {1: 0.22, 2: 0.30, 3: 0.38}[self.level]
-        up = 0.10
-        if self.state == "up" and drop > down:
-            self.state = "down"
-        elif self.state == "down" and drop < up:
-            self.state = "up"
+    def _frosch(self, pose, m, dt):             # Kniebeuge: the shoulders bob down and up
+        # unit: shoulder width (the hips drop out of view when squatting); a small bob is enough
+        if self.bob is None:
+            self.bob = Bob(*{1: (0.14, 0.08), 2: (0.22, 0.12), 3: (0.3, 0.18)}[self.level])
+        sw = self.sw = m.SW if self.sw is None else self.sw + (m.SW - self.sw) * 0.05   # calm unit
+        if self.bob.update(float(pose.mid("l_sh", "r_sh")[1]) / sw):
             self.count += 1
             self.rep_event = True
-        self.match = self.state == "down"
-        part = min(1.0, max(0.0, drop / down)) * 0.5 if self.state == "up" else \
-            0.5 + 0.5 * (1 - min(1.0, max(0.0, (drop - up) / (down - up))))
+        self.match = self.bob.state == "down"
+        part = 0.5 * self.bob.depth if self.bob.state == "up" else 0.6
         self.progress = min(1.0, (self.count + part * (self.count < self.need)) / self.need)
 
-    def _stern(self, pose, m, dt):              # Hampelmann: Arme hoch/runter
-        if not m.both:
-            return
-        oy = (m.arm["l"][1], m.arm["r"][1])
-        open_thr = {1: -0.2, 2: -0.35, 3: -0.5}[self.level]
-        is_open = max(oy) < open_thr
-        is_closed = min(oy) > 0.45
-        if self.state is None:
-            self.state = "open" if is_open else ("closed" if is_closed else None)
-        elif self.state == "closed" and is_open:
-            self.state = "open"
+    def _stern(self, pose, m, dt):              # Hampelmann: arms swing down and up again
+        # every clear down-and-up of the arms counts (relative, like Frosch). Level 1: the higher
+        # arm is enough, else the lower one must move too. Hand out of view: the elbow is used;
+        # nothing seen at all: the arms are where they were last (out of the top) or hanging down.
+        if self.bob is None:
+            self.bob = Bob(*{1: (0.45, 0.4), 2: (0.7, 0.6), 3: (0.9, 0.8)}[self.level])
+        ys = [float(v[1]) for v in (m.arm_vec("l"), m.arm_vec("r")) if v is not None]
+        if ys:
+            y = min(ys) if self.level == 1 else max(ys)
+        else:
+            y = self.last_y if self.last_y is not None and self.last_y < 0.3 else 1.0
+        self.last_y = y
+        if self.bob.update(y):
             self.count += 1
             self.rep_event = True
-        elif self.state == "open" and is_closed:
-            self.state = "closed"
-        self.match = self.state == "open"
-        self.progress = min(1.0, (self.count + (0.4 if self.match else 0)) / self.need)
+        self.match = y < 0.0                     # arms above the shoulders
+        self.progress = min(1.0, (self.count + 0.4 * self.bob.depth * (self.count < self.need)) / self.need)
+
+    def _schmetterling(self, pose, m, dt):     # Flügel schlagen: arms move up and down
+        # any clear up-and-down of the arms counts, at whatever height (the hand may be out of the
+        # picture - then the elbow is used); arms only need to be a little away from the body
+        if self.bob is None:
+            self.bob = Bob(*{1: (0.18, 0.14), 2: (0.25, 0.2), 3: (0.32, 0.26)}[self.level])
+        out = {1: 0.1, 2: 0.2, 3: 0.3}[self.level]
+        ys = []
+        for s, sign in (("l", -1), ("r", 1)):
+            v = m.arm_vec(s)
+            if v is not None and float(v[0]) * sign > out:
+                ys.append(float(v[1]))
+        if len(ys) < (1 if self.level == 1 else 2):
+            self.match = False
+            return
+        # one wing beat = arms up and down again (value: how high the arms are)
+        if self.bob.update(-sum(ys) / len(ys)):
+            self.count += 1
+            self.rep_event = True
+        self.match = True
+        self.progress = min(1.0, (self.count + 0.4 * self.bob.depth * (self.count < self.need)) / self.need)
 
     def _windmuehle(self, pose, m, dt):        # Arme kreisen
         moving = False
         for s in "lr":
-            a = m.arm[s]
-            if a is None or a[2] < 0.55:
+            v = m.arm_vec(s)                      # the elbow takes over when the hand is out of view
+            if v is None:
                 self.prev[s] = None
                 continue
-            v = pose.P(f"{s}_wr") - pose.P(f"{s}_sh")
             ang = math.atan2(v[1], v[0])
             if self.prev[s] is not None:
                 d = (ang - self.prev[s] + math.pi) % (2 * math.pi) - math.pi
-                self.acc[s] += d
-                moving = moving or abs(d) > 0.02
+                if abs(d) < 1.6:                  # ignore jumps (hand <-> elbow switch, glitches)
+                    self.acc[s] += d
+                    moving = moving or abs(d) > 0.02
             self.prev[s] = ang
         self.idle = 0.0 if moving else self.idle + dt
-        if self.idle > 1.5:
-            self.acc = {"l": 0.0, "r": 0.0}
+        if self.idle > 2.5:                       # a long stop slowly loses what was turned
+            for s in "lr":
+                self.acc[s] *= math.exp(-dt)
         circles = max(abs(self.acc["l"]), abs(self.acc["r"])) / (2 * math.pi)
-        need = {1: 1.5, 2: 2.0, 3: 3.0}[self.level]
+        need = {1: 0.6, 2: 1.0, 3: 1.6}[self.level]
         self.match = moving
         self.progress = min(1.0, circles / need)
 
 
 INFO = {
     "baum": ("Baum", "Mach den Baum! Strecke die Arme hoch.", pic_baum),
-    "storch": ("Storch", "Mach den Storch! Steh auf einem Bein.", pic_storch),
     "frosch": ("Frosch", "Mach den Frosch! Geh in die Hocke.", pic_frosch),
     "stern": ("Stern", "Mach den Stern! Arme hoch und runter.", pic_stern),
-    "schmetterling": ("Schmetterling", "Mach den Schmetterling! Arme zur Seite.", pic_schmetterling),
+    "schmetterling": ("Schmetterling", "Mach den Schmetterling! Flieg mit den Armen.", pic_schmetterling),
     "hase": ("Hase", "Mach den Hasen! Hände wie Hasenohren.", pic_hase),
     "windmuehle": ("Windmühle", "Mach die Windmühle! Dreh die Arme im Kreis.", pic_windmuehle),
 }
@@ -291,12 +330,8 @@ INFO = {
 def make_task(key, level):
     if key == "baum":
         return HoldTask(key, level, chk_baum)
-    if key == "schmetterling":
-        return HoldTask(key, level, chk_schmetterling)
     if key == "hase":
         return HoldTask(key, level, chk_hase)
-    if key == "storch":
-        return HoldTask(key, level, chk_storch, needs=("l_hip", "r_hip", "l_an", "r_an"))
     return RepTask(key, level)
 
 
@@ -309,7 +344,12 @@ def trainer_vec(key, t):
         v[0], v[1] = -0.32 * math.cos(a), 0.32 * math.sin(a)
         v[2], v[3] = 0.32 * math.cos(a), 0.32 * math.sin(a)
         return v
-    pose = PRESETS[{"storch": "storch"}.get(key, key)]
+    if key == "schmetterling":                  # arms out to the sides, flapping up and down
+        v = list(PRESETS["schmetterling"])
+        dy = 0.0 + 0.12 * math.sin(2 * math.pi * t / 0.8)
+        v[1] = v[3] = dy
+        return v
+    pose = PRESETS[key]
     period = {"frosch": 2.4, "stern": 1.6}.get(key, 3.4)
     u = (t % period) / period
     if key in ("frosch", "stern"):
@@ -318,6 +358,46 @@ def trainer_vec(key, t):
         k = min(1.0, u / 0.2) if u < 0.7 else max(0.0, 1 - (u - 0.7) / 0.2)
         k = k * k * (3 - 2 * k)
     return lerp_vec(stand, pose, k)
+
+
+# ------------------------------------------------------------------ Grafik ---
+
+ANIM_PERIOD = {"windmuehle": 2 * math.pi / 2.2, "schmetterling": 2 * math.pi / 6, "stern": math.pi}
+ANIM_FRAMES = 16
+
+
+def animal_sprite(key, t):
+    """Polished animal picture; moving ones (windmill, butterfly, star) cycle through cached frames."""
+    pic = INFO[key][2]
+    period = ANIM_PERIOD.get(key)
+    f = int(t / period * ANIM_FRAMES) % ANIM_FRAMES if period else 0
+    tt = f / ANIM_FRAMES * period if period else 0.0
+    return gfx.cached(("animal", key, f), lambda: gfx.icon_sprite(lambda s, c, r: pic(s, c, r, tt), 64,
+                                                                  pad=1.3, outline=4, depth=0.2))
+
+
+
+
+def _panel(size):
+    def build():
+        s = pygame.Surface(size, pygame.SRCALPHA)
+        pygame.draw.rect(s, (255, 255, 255, 150), s.get_rect(), border_radius=28)
+        pygame.draw.rect(s, (255, 255, 255, 230), s.get_rect(), 5, border_radius=28)
+        return gfx.sticker(s, 0, shadow=70, offset=(0, 6), blur=6)
+    return gfx.cached(("ypanel", tuple(size)), build)
+
+
+def _sad(surf, c, r):
+    x, y = c
+    ink = (40, 50, 90)
+    pygame.draw.circle(surf, (170, 180, 225), c, int(r))
+    for sx in (-1, 1):
+        pygame.draw.circle(surf, ink, (int(x + sx * r * .36), int(y - r * .18)), max(2, int(r * .09)))
+        pygame.draw.line(surf, ink, (x + sx * r * .55, y - r * .32), (x + sx * r * .2, y - r * .46),
+                         max(2, int(r * .06)))                                # inner ends up = sad
+    pygame.draw.arc(surf, ink, (x - r * .45, y + r * .2, r * .9, r * .6), math.radians(30), math.radians(150),
+                    max(3, int(r * .08)))
+    pygame.draw.circle(surf, (120, 190, 255), (int(x + r * .58), int(y + r * .05)), max(2, int(r * .09)))   # a tear
 
 
 # ---------------------------------------------------------------------- Spiel ---
@@ -329,7 +409,10 @@ class AnimalGame(Game):
 
     @staticmethod
     def icon(surf, c, r):
-        pic_frosch(surf, (c[0], c[1] - r * .05), r * 1.0, 0)
+        """The trainer figure that shows the poses, doing a happy star jump."""
+        rect = pygame.Rect(0, 0, int(r * 2.3), int(r * 2.4))
+        rect.center = (int(c[0]), int(c[1]))
+        draw_figure(surf, make_skeleton(PRESETS["stern"], aspect=1.0, s=0.74), rect, 1.0, y0=0.1, y1=0.99)
 
     def on_restart(self):
         self.order = random.sample(list(INFO), self.N)
@@ -339,7 +422,9 @@ class AnimalGame(Game):
     def begin_task(self):
         key = self.order[self.idx]
         self.task = make_task(key, self.ctx.level)
+        self.tasks = {}                  # one task per person (slot): whoever does it best counts
         self.phase, self.ptime = "show", 0.0
+        self.ctx.log("task", animal=key)
         self.said_back = False
         self.need_back = False
         self.task.rep_event = False
@@ -361,16 +446,22 @@ class AnimalGame(Game):
                     self.begin_task()
             return
         # ---- phase "do"
-        prog, match, back = 0.0, False, False
-        if pose and pose.ok:
-            m = Measures(pose)
-            prog, match, back = self.task.update(pose, m, dt)
-            if getattr(self.task, "rep_event", False):
-                self.task.rep_event = False
-                self.ctx.play("good")
+        prog, match, back = 0.0, False, True
+        for p in (pose.all if pose else []):
+            if not p.ok:
+                continue
+            task = self.tasks.get(p.slot)
+            if task is None:
+                task = self.tasks[p.slot] = make_task(self.order[self.idx], self.ctx.level)
+                task.rep_event = False
+            pr, mt, bk = task.update(p, Measures(p), dt)
+            if pr >= prog:
+                prog, self.task = pr, task
+            match, back = match or mt, back and bk
+            if getattr(task, "rep_event", False):
+                task.rep_event = False
+                self.ctx.play("quak" if self.order[self.idx] == "frosch" else "good")
                 self.particles.burst((self.W / 2, self.H / 2), 14, [(255, 230, 80), (255, 255, 255)], 300, .6, (3, 7), 300, "star")
-        else:
-            back = True
         self.need_back = back
         if back and not self.said_back and self.ptime > 3:
             self.said_back = True
@@ -385,6 +476,8 @@ class AnimalGame(Game):
         """stars: 3 = done, 0 = failed (time ran out)."""
         self.earned.append(stars)
         self.phase, self.ptime = "cheer", 0.0
+        self.ctx.log("task_end", animal=self.order[self.idx], stars=stars,
+                     progress=round(getattr(self, "prog", 0.0), 2))
         if stars == 0:
             self.ctx.play("down")
             self.ctx.say("Fehlgeschlagen!")
@@ -395,65 +488,35 @@ class AnimalGame(Game):
         self.ctx.say("Super!")
         self.particles.confetti(self.W, 40)
 
-    def _draw_player(self, surf, pose):
-        if not pose or not pose.ok:
-            return
-        col = (90, 255, 130) if (self.phase == "do" and self.task.match) else (255, 255, 255)
-        for a, b in BONES:
-            if pose.has(a, b, thr=0.4):
-                pygame.draw.line(surf, col, pose.P(a), pose.P(b), 7)
-        for n in ("l_sh", "r_sh", "l_el", "r_el", "l_wr", "r_wr", "l_hip", "r_hip", "l_kn", "r_kn", "l_an", "r_an"):
-            if pose.vis(n) >= 0.4:
-                pygame.draw.circle(surf, col, (int(pose.P(n)[0]), int(pose.P(n)[1])), 8)
-
     def play_draw(self, surf, pose):
         key = self.order[min(self.idx, self.N - 1)]
         name, _, pic = INFO[key]
-        if self.state == "play":
-            self._draw_player(surf, pose)
+        # (no skeleton and no green glow over the player: the ring around the animal shows progress)
         # Tier-Bild links oben mit Fortschrittsring
-        c = (125, 195)
-        circle_alpha(surf, (255, 255, 255, 170), c, 92)
+        c = (130, 200)
         k = ease_out_back(self.ptime / 0.5) if self.phase == "show" else 1.0
-        pic(surf, c, 62 * max(0.1, k), self.t)
         prog = getattr(self, "prog", 0.0) if self.phase == "do" else (
             (1.0 if self.earned[-1] else 0.0) if self.phase == "cheer" else 0.0)
-        pygame.draw.circle(surf, (255, 255, 255), c, 100, 4)
-        draw_ring(surf, c, 108, 98, prog, (255, 225, 60))
+        gfx.blit_center(surf, button_sprite(96, (255, 200, 60)), c, scale=0.6 + 0.4 * k)
+        gfx.blit_center(surf, animal_sprite(key, self.t), c, scale=max(0.05, k))
+        progress_ring(surf, c, 116, prog, width=14)
         # Trainer
-        panel = pygame.Rect(16, 318, 250, 330)
-        veil = pygame.Surface(panel.size, pygame.SRCALPHA)
-        pygame.draw.rect(veil, (255, 255, 255, 125), veil.get_rect(), border_radius=24)
-        surf.blit(veil, panel.topleft)
+        panel = pygame.Rect(16, 336, 250, 330)
+        gfx.blit_center(surf, _panel(panel.size), panel.center)
         asp = self.W / self.H
         draw_figure(surf, make_skeleton(trainer_vec(key, self.t), aspect=asp, s=0.74), panel.inflate(-20, -20), asp)
         # Sterne oben rechts
-        draw_stars_row(surf, (self.W - 160, 58), self.N, sum(1 for e in self.earned if e == 3), 36)   # only solved animals
-        if self.phase == "do":                       # shrinking time bar, red for the last 3 seconds
-            left = max(0.0, 1.0 - self.ptime / TIMEOUT[self.ctx.level])
-            w = 340
-            x0, y0 = self.W / 2 - w / 2, 22
-            pygame.draw.rect(surf, (255, 255, 255), (x0 - 3, y0 - 3, w + 6, 20), border_radius=10)
-            late = left * TIMEOUT[self.ctx.level] < 3.0
-            pygame.draw.rect(surf, (255, 90, 80) if late else (255, 170, 60),
-                             (x0, y0, w * left, 14), border_radius=7)
+        if self.phase == "do":                       # shrinking time bar, red for the last seconds
+            draw_timer(surf, (self.W / 2, self.H - 34), 360, 1.0 - self.ptime / TIMEOUT[self.ctx.level])
         if self.phase == "cheer":
             k = ease_out_back(self.ptime / 0.4)
             c = (self.W // 2, self.H // 2 - 40)
             if self.earned[-1]:                      # solved: a big gold star pops up
-                draw_star(surf, c, 150 * k, (255, 214, 40), self.t * 0.6, outline=(190, 120, 0))
+                gfx.blit_center(surf, gfx.sunburst(260), c, scale=k, angle=self.t * 30)
+                gfx.blit_center(surf, star_sprite(150), c, scale=max(0.05, k), angle=math.sin(self.t * 4) * 8)
             else:                                    # failed: a sad face (no words needed)
-                r = int(110 * k)
-                if r > 4:
-                    pygame.draw.circle(surf, (60, 70, 110), c, r + 6)
-                    pygame.draw.circle(surf, (170, 180, 225), c, r)
-                    for sx in (-1, 1):
-                        pygame.draw.circle(surf, (40, 50, 90), (c[0] + sx * r * .36, c[1] - r * .18), max(2, int(r * .09)))
-                        pygame.draw.line(surf, (40, 50, 90), (c[0] + sx * r * .55, c[1] - r * .32),
-                                         (c[0] + sx * r * .2, c[1] - r * .46), max(2, int(r * .06)))   # inner ends up = sad
-                    pygame.draw.arc(surf, (40, 50, 90), (c[0] - r * .45, c[1] + r * .2, r * .9, r * .6),
-                                    math.radians(30), math.radians(150), max(3, int(r * .08)))
-                    pygame.draw.circle(surf, (120, 190, 255), (c[0] + r * .58, c[1] + r * .05), max(2, int(r * .09)))
+                gfx.blit_center(surf, gfx.cached(("sadface",), lambda: gfx.icon_sprite(_sad, 110, pad=1.2)),
+                                c, scale=max(0.05, k))
 
     def result_draw(self, surf):
         pass                                          # the stars on top say it all

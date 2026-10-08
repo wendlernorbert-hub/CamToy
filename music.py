@@ -1,7 +1,8 @@
 """Background music: every part of the game has its own track.
 
 * "master"   - the kung fu song (file), for Kung-Fu-Meister
-* "menu", "bubbles", "animals", "dressup" - short loops composed in code (no extra files),
+* "pizza"    - the Italian song (file), for Pizza backen
+* "menu", "bubbles", "animals", "dressup", "car" - short loops composed in code (no extra files),
   rendered once at start-up and played as seamless loops.
 """
 import glob
@@ -13,9 +14,13 @@ import pygame
 _ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "music")
 
 FILES = {
-    "master": ("AgenChicken - Japanese DnB.ogg", 0.35),   # the kung fu song
+    # the kung fu song: measured as loud as the others, but its sound is mostly bass, which feels
+    # much quieter (and the hit sounds cover it) - so it gets more volume
+    "master": ("AgenChicken - Japanese DnB.ogg", 0.62),
+    # the pizza song (added by the user); mixed much louder than the others (RMS 0.13), so turned down
+    "pizza": ("italy.mp3", 0.32),
 }
-VOLUME = {"menu": 0.30, "bubbles": 0.28, "animals": 0.30, "dressup": 0.30, "pizza": 0.30, "car": 0.30}
+VOLUME = {"menu": 0.30, "bubbles": 0.28, "animals": 0.30, "dressup": 0.30, "car": 0.30}
 
 _NOTE = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 
@@ -102,7 +107,7 @@ def _kick(sr, dur=0.22, vol=0.5):
 
 
 def _compose(style: str, sr: int) -> np.ndarray:
-    rnd = np.random.RandomState({"menu": 3, "bubbles": 7, "animals": 11, "dressup": 5, "pizza": 13, "car": 17}[style])
+    rnd = np.random.RandomState({"menu": 3, "bubbles": 7, "animals": 11, "dressup": 5, "car": 17}[style])
     if style == "menu":                    # bright and welcoming
         bpm, bars = 108, 8
         prog = [("C3", ["C4", "E4", "G4", "A4", "C5"]), ("A2", ["A3", "C4", "E4", "G4", "A4"]),
@@ -123,11 +128,6 @@ def _compose(style: str, sr: int) -> np.ndarray:
         prog = [("C3", ["C4", "E4", "G4", "B4", "C5"]), ("G2", ["G3", "B3", "D4", "F#4", "G4"]),
                 ("A2", ["A3", "C4", "E4", "G4", "A4"]), ("F2", ["F3", "A3", "C4", "E4", "F4"])]
         lead, step = "tri", 0.5
-    elif style == "pizza":                 # bouncy mandolin-like plucks in A minor
-        bpm, bars = 134, 8
-        prog = [("A2", ["A3", "C4", "E4", "G4", "A4"]), ("D3", ["D4", "F4", "A4", "C5", "D5"]),
-                ("E2", ["E3", "G#3", "B3", "D4", "E4"]), ("A2", ["A3", "C4", "E4", "A4", "C5"])]
-        lead, step = "pluck", 0.5
     else:                                  # dressup: playful and bouncy
         bpm, bars = 124, 8
         prog = [("G2", ["G3", "B3", "D4", "E4", "G4"]), ("E2", ["E3", "G3", "B3", "D4", "E4"]),
@@ -146,8 +146,8 @@ def _compose(style: str, sr: int) -> np.ndarray:
             loop.add(t0, _pad(sr, _hz(scale[0]), 4 * beat * 1.05, 0.10))
         # bass
         for b in range(4):
-            if style in ("menu", "dressup", "pizza", "car") or b in (0, 2):
-                off = 0.5 if style in ("dressup", "pizza") and b % 2 else 0.0
+            if style in ("menu", "dressup", "car") or b in (0, 2):
+                off = 0.5 if style == "dressup" and b % 2 else 0.0
                 loop.add(t0 + (b + off) * beat, _bass(sr, _hz(root), beat * 0.9))
         # lead melody: random walk over the chord tones
         idx = rnd.randint(len(scale))
@@ -165,7 +165,7 @@ def _compose(style: str, sr: int) -> np.ndarray:
             else:
                 loop.add(at, _pluck(sr, f, 0.7 if style == "animals" else 0.5))
         # percussion
-        if style in ("menu", "dressup", "pizza", "car"):
+        if style in ("menu", "dressup", "car"):
             for k in range(8):
                 loop.add(t0 + k * 0.5 * beat, _hat(sr, rnd, vol=0.10 if k % 2 else 0.06))
             if style in ("dressup", "car"):
@@ -187,7 +187,7 @@ class MusicPlayer:
 
     def _render(self) -> None:
         sr = pygame.mixer.get_init()[0]
-        for style in ("menu", "bubbles", "animals", "dressup", "pizza", "car"):
+        for style in ("menu", "bubbles", "animals", "dressup", "car"):
             mono = _compose(style, sr)
             pcm = np.ascontiguousarray(
                 np.column_stack([mono, mono]) * 32000).astype(np.int16)

@@ -5,6 +5,10 @@ datas = [
     ("models", "models"),
     # the kung fu song is the only music file; everything else is composed in code
     ("assets/music/AgenChicken - Japanese DnB.ogg", "assets/music"),
+    ("assets/music/italy.mp3", "assets/music"),           # the pizza song
+    ("assets/fonts", "assets/fonts"),
+    ("assets/sfx/frog", "assets/sfx/frog"),           # CC0 frog ribbits (Tier-Yoga)
+    ("assets/sfx/pizza", "assets/sfx/pizza"),         # CC0 knife, grater, bites (Pizza)
 ]
 binaries, hiddenimports = [], []
 for pkg in ("mediapipe", "numpy"):

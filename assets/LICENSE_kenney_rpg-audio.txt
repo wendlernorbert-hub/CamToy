@@ -19,3 +19,4 @@
 
 	Follow on Twitter for updates:
 	@KenneyNL
+Used: assets/sfx/pizza/chop.ogg, knifeSlice*.ogg, drawKnife*.ogg (from https://kenney.nl/assets/rpg-audio, CC0)

@@ -78,6 +78,8 @@ class FrameGrabber:
         self._lock = threading.Lock()
         self._frame: np.ndarray | None = None
         self._seq = 0
+        self.fps = 0.0
+        self.size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
         self._running = True
         self._pending = None            # a new capture to switch to (handled by the reader thread)
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -88,6 +90,7 @@ class FrameGrabber:
         self._pending = cap
 
     def _run(self) -> None:
+        t0, n = time.perf_counter(), 0
         while self._running:
             if self._pending is not None:
                 old, self._cap, self._pending = self._cap, self._pending, None
@@ -97,6 +100,10 @@ class FrameGrabber:
                 with self._lock:
                     self._frame = frame
                     self._seq += 1
+                n += 1
+            now = time.perf_counter()
+            if now - t0 >= 1.0:
+                self.fps, t0, n = n / (now - t0), now, 0
 
     def latest(self) -> tuple[int, np.ndarray | None]:
         with self._lock:
@@ -111,19 +118,30 @@ class FrameGrabber:
 
 
 def to_surface(frame_rgb: np.ndarray, size) -> pygame.Surface:
-    h, w = frame_rgb.shape[:2]
-    s = pygame.image.frombuffer(np.ascontiguousarray(frame_rgb).tobytes(), (w, h), "RGB")
-    return pygame.transform.smoothscale(s, size).convert()
+    # OpenCV scales ~5x faster than smoothscale; BGRA is the screen's own pixel layout,
+    # so the surface can wrap the array without another conversion
+    bgra = cv2.resize(cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGRA), size, interpolation=cv2.INTER_LINEAR)
+    return pygame.image.frombuffer(bgra, size, "BGRA")
 
 
 def cutout_surface(frame_rgb: np.ndarray, mask: np.ndarray, size) -> pygame.Surface:
     h, w = frame_rgb.shape[:2]
     if mask.shape != (h, w):
         raise ValueError("Maske passt nicht zum Bild")
-    a = (np.clip((mask - 0.35) / 0.3, 0, 1) * 255).astype(np.uint8)
-    rgba = np.dstack((frame_rgb, a))
-    s = pygame.image.frombuffer(np.ascontiguousarray(rgba).tobytes(), (w, h), "RGBA")
-    return pygame.transform.smoothscale(s, size).convert_alpha()
+    bgra = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGRA)
+    bgra[:, :, 3] = np.clip(mask * (255 / 0.3) - 0.35 * 255 / 0.3, 0, 255)
+    return pygame.image.frombuffer(cv2.resize(bgra, size, interpolation=cv2.INTER_LINEAR), size, "BGRA")
+
+
+def MINIGAME_CLASSES():
+    """The games in menu order (imported late: they need pygame to be up)."""
+    from minigames.animals import AnimalGame
+    from minigames.bubbles import BubbleGame
+    from minigames.car import CarGame
+    from minigames.dressup import DressUpGame
+    from minigames.kungfu_master import KungFuGame
+    from minigames.pizza import PizzaGame
+    return [KungFuGame, BubbleGame, AnimalGame, DressUpGame, PizzaGame, CarGame]
 
 
 def main() -> None:
@@ -153,8 +171,10 @@ def main() -> None:
     def load_minigames() -> None:
         from minigames.common import Ctx, Sounds, Speaker
         from posetracker import PoseTracker
-        tracker = PoseTracker(res["grabber"], (CAPTURE_W, CAPTURE_H))
+        tracker = PoseTracker(res["grabber"], (CAPTURE_W, CAPTURE_H), DISPLAY_W / DISPLAY_H)
         tracker.start()
+        from minigames.warmup import prewarm             # polished sprites, made while the model loads
+        prewarm(MINIGAME_CLASSES())
         tracker.ready.wait(30)
         if tracker.error:
             raise RuntimeError("Pose-Modell konnte nicht geladen werden.\n" + tracker.error)
@@ -184,20 +204,19 @@ def main() -> None:
                     sys.exit(1)
 
     from menu import Menu
-    from minigames.animals import AnimalGame
-    from minigames.bubbles import BubbleGame
-    from minigames.dressup import DressUpGame
-    from minigames.kungfu_master import KungFuGame as KungFuMaster
-    from minigames.pizza import PizzaGame
-    from minigames.car import CarGame
-    from minigames.common import draw_cursors, rainbow, text
-    from minigames.pose import Pose
+    import gfx
+    from minigames.common import draw_cursors, ease_out_back, rainbow, text, veil
+    from minigames.pose import make_players
+    import telemetry
 
     grabber, tracker, ctx = res["grabber"], res["tracker"], res["ctx"]
     cam_index = res["cam_index"]
     jukebox = res["music"]
+    tele = telemetry.Telemetry(telemetry.enabled())
+    ctx.log = tele.event
+    tele.event("camera", index=cam_index, size="%dx%d" % grabber.size)
 
-    MINIGAMES = [KungFuMaster, BubbleGame, AnimalGame, DressUpGame, PizzaGame, CarGame]
+    MINIGAMES = MINIGAME_CLASSES()
     menu = Menu(ctx, [(g.title, g.icon) for g in MINIGAMES])
 
     last_time = time.perf_counter()
@@ -218,8 +237,10 @@ def main() -> None:
         tracker.set_segmentation(False)
         tracker.set_active(True)
         jukebox.play("menu")
+        menu.pause()
         last_fid = -1
         phase = "menu"
+        tele.event("phase", to="menu")
 
     def begin_countdown(choice: int) -> None:
         """A game was picked with the hands: count 3-2-1, then it starts."""
@@ -234,14 +255,17 @@ def main() -> None:
         tracker.set_active(True)
         jukebox.play(MINI_TRACKS[i])
         phase = "mini"
+        tele.event("phase", to="mini", game=MINIGAMES[i].__name__, level=ctx.level)
 
     goto_menu()
 
     running = True
+    loop_start = time.perf_counter()
     try:
         while running:
             clock.tick(120)   # only idles while waiting for the next camera frame
             now = time.perf_counter()
+            loop_ms, loop_start = (now - loop_start) * 1000, now
 
             for ev in pygame.event.get():
                 if ev.type == pygame.QUIT:
@@ -261,6 +285,11 @@ def main() -> None:
                             cam_index = found[1]
                     elif ev.key in (pygame.K_1, pygame.K_2, pygame.K_3):
                         ctx.level = ev.key - pygame.K_0
+                        tele.event("level", level=ctx.level)
+                    elif ev.key == pygame.K_m:                # play-test: "look at this moment"
+                        tele.mark(screen, phase)
+                    elif ev.key == pygame.K_F3:
+                        tele.overlay = not tele.overlay
 
             # ---- menu / games: pose driven, full-frame camera picture ----
             dt = min(now - last_time, 0.1)
@@ -272,7 +301,7 @@ def main() -> None:
                 pygame.display.flip()
                 continue
 
-            fid, frame, lm, mask = tracker.latest()
+            fid, frame, people, mask = tracker.latest()
             want_mask = bool(mini and mini.needs_mask)
             # A game may show the player smaller, at a fixed spot (scale, left, top as screen
             # fractions), e.g. sitting in a car. The pose is mapped into that picture too.
@@ -288,15 +317,19 @@ def main() -> None:
                         person_surf = None
                 if view:
                     size = (int(DISPLAY_W * view[0]), int(DISPLAY_H * view[0]))
-                    cam_small = pygame.transform.smoothscale(cam_surf, size)
-                    person_small = (pygame.transform.smoothscale(person_surf, size)
+                    cam_small = to_surface(frame, size)
+                    person_small = (cutout_surface(frame, mask, size)
                                     if person_surf is not None else None)
             ctx.has_mask = want_mask and person_surf is not None
-            if lm is not None and view:
-                lm = lm.copy()
-                lm[:, 0] = view[1] + lm[:, 0] * view[0]
-                lm[:, 1] = view[2] + lm[:, 1] * view[0]
-            pose = Pose(lm, DISPLAY_W, DISPLAY_H) if lm is not None else None
+            if view:
+                mapped = []
+                for slot, lm in people:
+                    lm = lm.copy()
+                    lm[:, 0] = view[1] + lm[:, 0] * view[0]
+                    lm[:, 1] = view[2] + lm[:, 1] * view[0]
+                    mapped.append((slot, lm))
+                people = mapped
+            pose = make_players(people, DISPLAY_W, DISPLAY_H)
 
             if phase == "mini":
                 mini.update(dt, pose)
@@ -333,17 +366,25 @@ def main() -> None:
                     screen.blit(person_surf, (0, 0))
                 mini.draw(screen, pose)
             elif phase == "countdown":
-                veil = pygame.Surface((DISPLAY_W, DISPLAY_H), pygame.SRCALPHA)
-                veil.fill((20, 25, 70, 110))
-                screen.blit(veil, (0, 0))
+                screen.blit(veil((DISPLAY_W, DISPLAY_H), (20, 25, 70, 110)), (0, 0))
                 frac = count_t - int(count_t)               # 0 -> 1 within each second
-                text(screen, str(count_n), int(380 - 120 * frac),
-                     (DISPLAY_W // 2, DISPLAY_H // 2 - 20), rainbow(count_n, 6, .55))
+                mid = (DISPLAY_W // 2, DISPLAY_H // 2 - 10)
+                gfx.blit_center(screen, gfx.sunburst(320, rainbow(count_n, 6, .35)), mid, angle=count_t * 30)
+                gfx.blit_center(screen, gfx.label(str(count_n), 300, rainbow(count_n, 6, .55)), mid,
+                                scale=ease_out_back(frac / 0.35) * (1 - 0.15 * frac))
                 draw_cursors(screen, pose, count_t)
             else:
                 menu.draw(screen, pose)
+            tele.frame((time.perf_counter() - now) * 1000, loop_ms, pose)
+            tele.tick(screen, phase if phase != "mini" else type(mini).__name__, tracker, grabber)
+            tele.draw_overlay(screen)
             pygame.display.flip()
+    except Exception:                       # keep the reason in the play-test log, then stop as before
+        import traceback
+        tele.event("CRASH", where=phase, error=traceback.format_exc().replace("\n", " | "))
+        raise
     finally:
+        tele.close()
         if mini is not None:
             mini.on_exit()
         tracker.stop()

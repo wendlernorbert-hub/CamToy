@@ -1,0 +1,2 @@
+﻿Eigenes Frosch-Quaken fuer das Tier-Yoga hier als quak.wav, quak.ogg oder quak.mp3 ablegen.
+Ohne Datei spielt beim Frosch der normale 'Gut gemacht'-Ton.

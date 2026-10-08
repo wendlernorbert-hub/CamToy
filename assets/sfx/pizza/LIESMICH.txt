@@ -1,0 +1,4 @@
+﻿Eigene Stimmen fuer den Pizzakoch hier ablegen (wav, ogg oder mp3):
+  omnom.*  - beim Abbeissen (z.B. 'Omnomnom')
+  mmh.*    - wenn es ihm schmeckt (z.B. 'Mmmh!')
+Ohne Datei hoert man nur die Bissgeraeusche und eine kurze Fanfare.
