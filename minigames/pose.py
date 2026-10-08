@@ -110,11 +110,11 @@ class Pose:
 
 
 class Players:
-    """Everyone in view (usually a child on a parent's lap).
+    """Several people as one object (only used by tools such as tests/preview.py - in the game
+    the PlayerPicker hands over the one player only).
 
     Behaves like the main person's Pose for code that only looks at one body; the hand
-    helpers return the hands of everybody, so both people can hit, pop and press buttons.
-    `all` lists every Pose (each with its own .slot)."""
+    helpers return the hands of everybody. `all` lists every Pose (each with its own .slot)."""
 
     def __init__(self, poses):
         self.all = poses
@@ -148,6 +148,74 @@ def make_players(people, w, h):
     if not poses:
         return None
     return poses[0] if len(poses) == 1 else Players(poses)
+
+
+def child_score(lm):
+    """How child-like a body looks, from the landmarks alone (bigger = more like a small child).
+
+    A small child has a big head for its shoulders: head width / shoulder width is about 0.55 at
+    3-4 years and about 0.4 for an adult, at any distance from the camera. The size in the picture
+    adds a little ("the smallest person"), so it only decides between two alike bodies.
+    None: the upper body is not seen well enough to judge."""
+    p = Pose(lm, 1.0, 1.0)
+    if not p.ok:
+        return None
+    sw = p.shoulder_w()
+    if sw < 0.02:
+        return None
+    head = p.head()
+    ratio = head[1] / sw if head else 0.45          # face not seen: neither child nor adult
+    return min(ratio, 1.0) + 0.15 * (1.0 - min(sw, 1.0))
+
+
+class PlayerPicker:
+    """Finds THE player among everyone in view: the smallest person (see child_score).
+
+    One child plays alone; anybody else in the picture - a parent, a sibling walking by - is a
+    disturbance and must not take over. So the choice is sticky: another person becomes the
+    player only after looking clearly more child-like for SWITCH_AFTER seconds, or when the
+    player has been gone for LOST_AFTER seconds."""
+    SWITCH_AFTER = 2.0
+    MARGIN = 0.06
+    LOST_AFTER = 0.8
+
+    def __init__(self):
+        self.slot = None
+        self.scores = {}              # slot -> smoothed child_score
+        self.lost = 0.0
+        self.better = 0.0             # how long a challenger has been clearly ahead
+
+    def update(self, people, dt):
+        """people: [(slot, landmarks)] -> [(slot, landmarks)] of the player only (or [])."""
+        here = dict(people)
+        for slot in list(self.scores):
+            if slot not in here:
+                del self.scores[slot]
+        for slot, lm in people:
+            s = child_score(lm)
+            if s is not None:
+                old = self.scores.get(slot)
+                self.scores[slot] = s if old is None else old + (s - old) * min(1.0, dt * 3)
+        if not here:
+            self.lost += dt
+            return []
+        best = max(here, key=lambda s: self.scores.get(s, -1.0))
+        if self.slot not in here:
+            self.lost += dt
+            if self.slot is None or self.lost >= self.LOST_AFTER:
+                self.slot, self.lost, self.better = best, 0.0, 0.0
+            else:
+                return []                      # a short dropout: do not hand over yet
+        else:
+            self.lost = 0.0
+            mine = self.scores.get(self.slot, -1.0)
+            if best != self.slot and self.scores.get(best, -1.0) > mine + self.MARGIN:
+                self.better += dt
+                if self.better >= self.SWITCH_AFTER:
+                    self.slot, self.better = best, 0.0
+            else:
+                self.better = 0.0
+        return [(self.slot, here[self.slot])]
 
 
 # ---------------------------------------------------------------- Skelett ---
@@ -235,8 +303,20 @@ def make_skeleton(vec=None, cx=0.5, ground=0.97, s=0.80, aspect=4 / 3):
 # ------------------------------------------------------------ Zeichnen ---
 
 def draw_figure(surf, lm, rect, aspect=4 / 3, body=(70, 150, 235), skin=(255, 214, 170),
-                y0=0.08, y1=0.99):
-    """Zeichnet ein niedliches Strichmännchen aus Landmarks in ein Rechteck."""
+                y0=0.08, y1=0.99, legs=True):
+    """Zeichnet ein niedliches Strichmännchen aus Landmarks in ein Rechteck.
+    legs=False: only the upper body (what the camera sees of a sitting child); whatever
+    reaches out of the rectangle is cut off."""
+    import pygame
+    old_clip = surf.get_clip()
+    surf.set_clip(rect.clip(old_clip))
+    try:
+        _draw_figure(surf, lm, rect, aspect, body, skin, y0, y1, legs)
+    finally:
+        surf.set_clip(old_clip)
+
+
+def _draw_figure(surf, lm, rect, aspect, body, skin, y0, y1, legs):
     import pygame
     scale = rect.h / (y1 - y0)
 
@@ -253,8 +333,8 @@ def draw_figure(surf, lm, rect, aspect=4 / 3, body=(70, 150, 235), skin=(255, 21
         pygame.draw.circle(surf, col, (int(a[0]), int(a[1])), width // 2)
         pygame.draw.circle(surf, col, (int(b[0]), int(b[1])), width // 2)
 
-    chains = [("l_hip", "l_kn", "l_an"), ("r_hip", "r_kn", "r_an"),
-              ("l_sh", "l_el", "l_wr"), ("r_sh", "r_el", "r_wr")]
+    chains = ([("l_hip", "l_kn", "l_an"), ("r_hip", "r_kn", "r_an")] if legs else []) + \
+             [("l_sh", "l_el", "l_wr"), ("r_sh", "r_el", "r_wr")]
     for outline in (True, False):
         col = dark if outline else body
         ww = w + 6 if outline else w
@@ -271,7 +351,7 @@ def draw_figure(surf, lm, rect, aspect=4 / 3, body=(70, 150, 235), skin=(255, 21
         p = m(n)
         pygame.draw.circle(surf, dark, (int(p[0]), int(p[1])), w // 2 + 5)
         pygame.draw.circle(surf, skin, (int(p[0]), int(p[1])), w // 2 + 2)
-    for n in ("l_an", "r_an"):
+    for n in (("l_an", "r_an") if legs else ()):
         p = m(n)
         pygame.draw.circle(surf, dark, (int(p[0]), int(p[1])), w // 2 + 5)
         pygame.draw.circle(surf, (230, 90, 70), (int(p[0]), int(p[1])), w // 2 + 2)

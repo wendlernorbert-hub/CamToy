@@ -3,12 +3,16 @@
 Ablauf (kein Verlieren, alles mit den Händen). Der Teig ist zuerst ganz ohne Soße.
   1. Ganze Zutat (Tomate, Paprika, Oliven, Pilz, Salami, Käse) am Rand: Hand drauf halten.
   2. Vorbereiten, je nach Zutat: Tomaten püriert der Pürierstab von selbst zu Soße, Käse an der
-     Reibe reiben (Hand auf und ab), Salami und Pilze mit dem Messer in Scheiben (Hand nach unten).
+     Reibe reiben (Hand auf und ab), Salami und Pilze mit dem Messer in Scheiben. Das Messer wartet
+     schon über der Zutat; die Hand nimmt es, und es schneidet, wenn man es dort hält (oder schnell
+     nach unten hackt). Die Hand, die an das Brett kommt, hat Messer bzw. Käse von selbst in der Hand.
   3. Belegen: Soße mit der Kelle über die Pizza streichen, Käse darüber streuen (die Hand
      bewegt sich über der Pizza), Stücke einzeln hintragen und mit stiller Hand ablegen.
   4. Ofen-Knopf oben rechts (wie "nochmal") -> ein Steinofen kommt, die Pizza hineinschieben,
-     7 Sekunden backen (sie wird goldbraun), in 8 Stücke schneiden, ein Junge isst sie auf.
-Sterne nach Menge, Vielfalt und wie viel Soße drauf ist.
+     7 Sekunden backen (sie wird goldbraun), in 8 Stücke schneiden, der Koch probiert ein Stück -
+     genau das geschnittene Stück dieser Pizza, Biss für Biss.
+Passiert ein paar Sekunden nichts, macht eine durchsichtige Hand den nächsten Schritt vor.
+Belohnung ist der glückliche Koch; die Wertung (Menge, Vielfalt, Soße) steht nur im Log.
 """
 import math
 import random
@@ -19,15 +23,19 @@ import pygame
 
 import gfx
 from .common import (DwellButton, Game, button_sprite, circle_alpha, ease_out_back, ease_out_cubic,
-                     ellipse_pts, heart_pts, progress_ring, star_pts)
+                     ellipse_pts, ghost_hand, heart_pts, progress_ring, star_pts)
 
 R = 170                       # Pizza-Radius
 MAX_TOPPINGS = 60             # pieces (salami, mushrooms)
 MAX_CHEESE = 260              # grated cheese bits
 PICK_TIME = 0.6               # Hand so lange auf der ganzen Zutat halten
 PIECES = 8                    # Stücke pro geschnittener Zutat
-CHOP_SPEED = {1: 280, 2: 380, 3: 480}     # px/s nach unten = ein Hackschlag
+CHOP_SPEED = {1: 220, 2: 340, 3: 460}     # px/s nach unten = ein Hackschlag
 CHOP_GAP = 0.28               # Sekunden zwischen zwei Schnitten
+HOVER_CUT = {1: 0.85, 2: 1.0, 3: 1.2}     # oder: so lange das Messer über der Zutat halten = ein Schnitt
+CUT_REACH = 95                # px um die Schnittstelle, in denen das Halten schneidet
+TAKE_REACH = 120              # px um das wartende Messer, in denen die Hand es nimmt
+CUT_FRAC = 0.17               # jeder Schnitt nimmt so viel von der sichtbaren Länge der Zutat
 PLACE_TIME = 0.4              # Hand mit Stück so lange still über der Pizza = ablegen
 STILL_SPEED = 160             # px/s: langsamer zählt als "still"
 BAKE_TIME = 7.0
@@ -42,7 +50,12 @@ DAB_R = 34                    # radius of one smear of sauce
 SLICE_CUT = 0.5               # seconds the pizza cutter needs for one cut (4 cuts = 8 slices)
 # eating (seconds into the "eat" phase): customer rises, takes a slice, 3 bites, "mmmh!", done
 EAT_TAKE, EAT_BITES, EAT_YUM, EAT_END = 1.0, (1.05, 1.6, 2.15), 2.7, 4.2
-PUSH_TIMEOUT = 8.0            # berührt sie niemand, rutscht die Pizza von selbst in den Ofen
+SLICE_LIFT = 0.45             # seconds the real slice flies from the pizza to the chef's mouth
+SLICE_HANG = -157.5           # degrees: the slice turns so its tip points up into the mouth
+SLICE_HOLD = 0.6              # its size at the mouth
+BITE = 0.28                   # one bite takes this much of the slice's length (times R)
+PUSH_SPEED = 2.5              # so schnell (Anteil des Wegs pro Sekunde) folgt die Pizza der schiebenden Hand
+HINT_AFTER = 4.0              # so lange nichts passiert: eine Geister-Hand zeigt, was als Nächstes dran ist
 
 KINDS = ["tomato", "cheese", "salami", "mushroom"]       # (pepper and olive are drawn too, for later)
 NAMES = {"tomato": "Tomate", "pepper": "Paprika", "olive": "Oliven", "mushroom": "Pilze",
@@ -348,21 +361,6 @@ def _pot(surf, c, r, sauce=True):
             pygame.draw.circle(surf, (235, 90, 70), (int(x + dx * r), int(y - r * .1)), int(r * .07))
 
 
-def slice_sprite():
-    """One pizza slice (crust, sauce, cheese, a salami)."""
-    def draw(s, c, r):
-        x, y = c
-        tip, l, rr = (x, y + r * .9), (x - r * .55, y - r * .7), (x + r * .55, y - r * .7)
-        pygame.draw.polygon(s, (232, 182, 100), [tip, l, rr])
-        pygame.draw.polygon(s, (210, 55, 40), [(x, y + r * .7), (x - r * .45, y - r * .55), (x + r * .45, y - r * .55)])
-        for dx, dy in ((-.15, -.25), (.12, .05), (-.05, .35)):
-            pygame.draw.line(s, (255, 230, 120), (x + dx * r, y + dy * r), (x + (dx + .15) * r, y + (dy - .05) * r),
-                             max(2, int(r * .06)))
-        pygame.draw.circle(s, (180, 50, 50), (int(x + r * .05), int(y - r * .3)), int(r * .14))
-        pygame.draw.ellipse(s, (240, 200, 130), (l[0] - r * .05, l[1] - r * .12, rr[0] - l[0] + r * .1, r * .26))
-    return gfx.cached(("slice",), lambda: gfx.icon_sprite(draw, 46, pad=1.2, outline=3, depth=0.2))
-
-
 def melted_cheese_sprite(spot=False):
     """A soft pool of melted cheese (some with a golden-brown bubble). Neighbours flow together."""
     def draw(s, c, r):
@@ -472,11 +470,14 @@ class PizzaGame(Game):
         self.last_chop = -9.0
         self.drops = []                           # (x, y, age) little bounce when a piece lands
         self.push = 0.0                           # 0 = pizza on the table .. 1 = inside the oven
-        self.grab = None                          # the hand that touched the pizza: it slides into the oven
+        self.grab = None                          # the hand pushing the pizza into the oven
+        self.grab_rel = 0.0                       # where on the pizza it pushes (px at full size)
+        self.push_idle = 0.0                      # seconds the pizza has not moved towards the oven
         self.tool_hand = None                     # the hand that holds the knife / the cheese for grating
         self.tool_lost = 0.0
         self.eaten = 0
         self.hearts = []                          # (x, y, age) rising after "mmmh"
+        self.hint_t, self._hint_key = 0.0, None   # time without progress (for the ghost hand)
         self._sprites = {}
         self._result_pie = self._pie_key = self._deco_key = None
 
@@ -618,8 +619,10 @@ class PizzaGame(Game):
         elif self.phase == "eat":
             # the customer takes ONE slice: om-nom-nom (3 bites), then "mmmh!" with hearts
             t, mx, my = self.phase_t, *self._eater_pos()
-            if t >= EAT_TAKE and self.eaten == 0:
-                self.eaten = 1
+            if t >= EAT_TAKE - SLICE_LIFT and self.eaten == 0:
+                self.eaten = 1                              # the cut slice lifts off: the gap appears now
+                self.ctx.play("whoosh")
+            if t - dt < EAT_TAKE <= t:
                 self.ctx.play("omnom")                      # (only with an own recording)
             for bt in EAT_BITES:
                 if t - dt < bt <= t:
@@ -642,6 +645,11 @@ class PizzaGame(Game):
     def _decorate(self, dt, hands, vel):
         self.timer += dt
         lv = self.ctx.level
+        # any progress (a pick, a cut, a piece or a dab of sauce) resets the hint clock
+        key = (self.item and (self.item["kind"], self.item["work"]), self.bowl and self.bowl["left"],
+               len(self.toppings), self.sauce_dabs, tuple(sorted(self.carry)))
+        self.hint_t = self.hint_t + dt if key == self._hint_key else 0.0
+        self._hint_key = key
         # 1) pick a whole ingredient from the side
         for b in self.bins:
             # any hand can pick - also one that still holds something (play-test bug report)
@@ -666,8 +674,9 @@ class PizzaGame(Game):
         elif self.item:
             self.item["t"] += dt
             tool = TOOL.get(self.item["kind"], "knife")
-            # first take the knife (or the piece of cheese) in the hand - only that hand works;
-            # if the hand is lost by the camera only for a moment, the tool stays in it
+            # the hand that comes to the board takes the knife (or the piece of cheese) by itself -
+            # no extra "grab" step (MANIFEST: every step without explanation); only that hand
+            # works, and if the camera loses it only for a moment, the tool stays in it
             if self.tool_hand is not None and self.tool_hand not in hands:
                 self.tool_lost += dt
                 if self.tool_lost > 0.6:
@@ -677,7 +686,7 @@ class PizzaGame(Game):
             if self.tool_hand is None:
                 rx, ry = self._tool_rest(tool)
                 for n, (x, y) in hands.items():
-                    if math.hypot(x - rx, y - ry) < 80:
+                    if math.hypot(x - rx, y - ry) < TAKE_REACH or (abs(x - sx) < 190 and sy - 140 < y < sy + 110):
                         self.tool_hand = n
                         self.ctx.play("click")
                         break
@@ -687,9 +696,20 @@ class PizzaGame(Game):
                 vx, vy = vel.get(n, (0.0, 0.0))
                 fast = (vy > CHOP_SPEED[lv] and abs(vx) < vy * 1.5) if tool != "grater" else \
                     (abs(vy) > CHOP_SPEED[lv] * 0.6 and abs(vx) < abs(vy) * 1.5)
-                if (abs(x - sx) < 190 and sy - 140 < y < sy + 110 and fast
-                        and self.t - self.last_chop > (CHOP_GAP if tool != "grater" else 0.18)):
+                # the knife also cuts by just being held over the ingredient (no chop needed)
+                hover_cut = False
+                if tool == "knife":
+                    cx_, cy_ = self._cut_point()
+                    if math.hypot(x - cx_, y - (cy_ - 30)) < CUT_REACH:
+                        self.item["hover"] = self.item.get("hover", 0.0) + dt
+                        hover_cut = self.item["hover"] >= HOVER_CUT[lv]
+                    else:
+                        self.item["hover"] = max(0.0, self.item.get("hover", 0.0) - dt * 2)
+                chop = (abs(x - sx) < 190 and sy - 140 < y < sy + 110 and fast
+                        and self.t - self.last_chop > (CHOP_GAP if tool != "grater" else 0.18))
+                if chop or hover_cut:
                     self.last_chop = self.t
+                    self.item["hover"] = 0.0
                     self.item["work"] += 1
                     self._work_effect(tool)
                     if self.item["work"] >= WORK[tool]:
@@ -770,9 +790,24 @@ class PizzaGame(Game):
             self.ctx.play("whoosh")
 
     def _tool_rest(self, tool):
-        """Where the knife / the cheese lies until a hand takes it."""
+        """Where the knife / the cheese waits until a hand takes it. The knife hovers right over
+        the spot of the next cut, so the hand that takes it is already where it cuts."""
         sx, sy = self.station
+        if tool == "knife" and self.item:
+            x, y = self._cut_point()
+            return (x - 8, y - 40)
         return (sx + 175, sy + 10) if tool == "knife" else (sx - 75, sy - 5)
+
+    def _cut_right(self):
+        """x where what is left of the ingredient ends: every cut takes a slice off the visible
+        part (the sprite has see-through margins, they do not count)."""
+        bb = whole_sprite(self.item["kind"]).get_bounding_rect()
+        return self.station[0] - 110 + bb.right - bb.width * CUT_FRAC * self.item["work"]
+
+    def _cut_point(self):
+        """Where the next cut goes through the ingredient (a slice's width in from its end)."""
+        bb = whole_sprite(self.item["kind"]).get_bounding_rect()
+        return (self._cut_right() - CUT_FRAC * bb.width * 0.8, self.station[1] - 12)
 
     def _blend(self, dt):
         """Tomatoes -> sauce: the blender does it by itself (play-test: a hand motion for it felt
@@ -801,19 +836,33 @@ class PizzaGame(Game):
             self.particles.burst((sx + 40, sy + 40), 6, [(255, 220, 90), (250, 200, 60)], 120, 0.5, (2, 4), 500)
 
     def _to_oven(self, dt, hands):
+        """The child pushes the pizza into the oven itself: a hand on the pizza takes it along
+        towards the oven. It only goes forwards (never slides back) and stays where it is let go,
+        so it can be pushed in several goes; the hand may touch it anywhere, also at the edge."""
         (px, py), sc = self._pizza_pos()
         if self.phase_t < 0.6:                              # the oven is still sliding in
             return
-        # one touch on the pizza is enough: then it slides into the oven by itself
-        # (play-test: dragging it all the way was too hard)
+        self.push_idle += dt
+        if self.grab and self.grab not in hands:            # hand lost by the camera: let go
+            self.grab = None
         if not self.grab:
             for n, (x, y) in hands.items():
-                if math.hypot(x - px, y - py) < R * sc * 1.2:
-                    self.grab = n
-                    self.ctx.play("whoosh")
+                if math.hypot(x - px, y - py) < R * sc * 1.25:
+                    self.grab, self.grab_rel = n, (px - x) / sc     # where on the pizza the hand is
+                    self.ctx.play("click")
                     break
-        if self.grab or self.phase_t > PUSH_TIMEOUT:
-            self.push = min(1.0, self.push + dt * 1.1)
+        if self.grab:
+            x, y = hands[self.grab]
+            want_x = x + self.grab_rel * sc                 # where the hand would put the pizza
+            if math.hypot(want_x - px, y - py) > R * 0.9 + 60:
+                self.grab = None                            # the hand went away: the pizza stays
+            else:
+                cx, ox = self.center[0], self._oven_mouth()[0]
+                u = min(1.0, max(0.0, (want_x - cx) / (ox - cx)))
+                goal = 1 - (1 - u) ** (1 / 3)               # undo the easing in _pizza_pos
+                if goal > self.push:
+                    self.push = min(1.0, self.push + min(goal - self.push, dt * PUSH_SPEED))
+                    self.push_idle = 0.0
         if self.push >= 0.92:
             self.push = 1.0
             self.grab = None
@@ -920,7 +969,7 @@ class PizzaGame(Game):
             mx, my = self._oven_mouth()
             gfx.add_glow(surf, (mx, my - 20), 110, (255, 140, 40), 0.15 + 0.05 * math.sin(self.t * 7))
             progress_ring(surf, (ovx, ovy - 175), 34, baked, (255, 170, 60), 12)   # baking clock
-        if self.phase == "to_oven" and not self.grab and self.phase_t > 0.6:     # "touch it" arrows
+        if self.phase == "to_oven" and not self.grab and self.phase_t > 0.6:     # "push it in" arrows
             for i in range(3):
                 k = (self.t * 1.5 + i / 3) % 1.0
                 ax = px + R * sc + 20 + k * 120
@@ -928,6 +977,10 @@ class PizzaGame(Game):
                 gfx.add_glow(surf, (ax + 10, py), 34, (255, 200, 90), 0.5 * math.sin(k * math.pi))
                 pygame.draw.polygon(surf, (255, 230, 120), pts)
                 pygame.draw.aalines(surf, gfx.INK, True, pts)
+            if self.push_idle > HINT_AFTER - 1.0:           # a see-through hand pushes it, to show how
+                u = (self.t * 0.7) % 1.0
+                k = ease_out_cubic(min(1.0, u / 0.7))
+                ghost_hand(surf, (px - R * sc * 0.6 + 150 * k, py + 10), self.t)
         if self.phase == "slice" and cuts < 4:
             self._draw_cutter(surf, (px, py), cuts, (self.phase_t % SLICE_CUT) / SLICE_CUT)
         if self.phase == "eat":
@@ -946,21 +999,62 @@ class PizzaGame(Game):
         gfx.blit_center(surf, cutter_handle_sprite(), (x + 46, y - 46))
         gfx.blit_center(surf, cutter_wheel_sprite(), (x, y), angle=-p * 720)
 
+    def _slice_surface(self, bites=0):
+        """The slice the chef eats, cut out of THIS baked pizza (the same wedge that leaves the gap,
+        see _pie_surface). Same size as the pizza surface, with the slice's tip in its centre, so
+        it turns around the tip. bites: that many bites are taken from the tip."""
+        key = ("eatslice", bites)
+        if key not in self._sprites:
+            pie = self._pie_surface(1.0, 0, 4)
+            c = pie.get_width() // 2
+            a0 = -math.pi / 2                                       # slice 0 of _pie_surface's "eaten"
+            pts = [(c, c)] + [(c + math.cos(a0 + k * math.pi / 16) * R, c + math.sin(a0 + k * math.pi / 16) * R)
+                              for k in range(5)]
+            mask = pygame.Surface(pie.get_size(), pygame.SRCALPHA)
+            mask.fill((255, 255, 255, 0))
+            pygame.draw.polygon(mask, (255, 255, 255, 255), pts)
+            out = pie.copy()
+            out.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+            dx, dy = math.cos(a0 + math.pi / 8), math.sin(a0 + math.pi / 8)     # along the slice
+            nx, ny = -dy, dx
+            gone = (0, 0, 0, 0)
+            if bites:
+                pygame.draw.circle(out, gone, (c, c), int(max(0.0, bites * BITE - 0.12) * R))
+            for j in range(1, bites + 1):                           # scalloped bite marks
+                a = (j * BITE - 0.06) * R
+                pygame.draw.circle(out, gone, (int(c + dx * a), int(c + dy * a)), int(0.17 * R))
+                for s in (-1, 1):
+                    b = a - 0.04 * R
+                    pygame.draw.circle(out, gone, (int(c + dx * b + s * nx * 0.13 * R), int(c + dy * b + s * ny * 0.13 * R)),
+                                       int(0.12 * R))
+            self._sprites[key] = out
+        return self._sprites[key]
+
     def _draw_eater(self, surf, pizza_at):
         px, py = pizza_at
         mx, my = self._eater_pos()
         t = self.phase_t
         mouth, happy = 0.0, t >= EAT_YUM
-        if EAT_TAKE - 0.4 <= t < EAT_TAKE + 0.15:          # the slice flies to the mouth
-            k = min(1.0, (t - (EAT_TAKE - 0.4)) / 0.4)
-            a = -math.pi / 2 + math.pi / 8
-            x = px + math.cos(a) * R * .55 * (1 - k) + (mx - px) * k
-            y = py + math.sin(a) * R * .55 * (1 - k) + (my + 50 - py) * k
-            gfx.blit_center(surf, slice_sprite(), (x, y), scale=1 - 0.4 * k, angle=-30 * k)
-            mouth = k
-        elif EAT_TAKE <= t < EAT_YUM:                       # chewing: om - nom - nom
+        k = min(1.0, max(0.0, (t - (EAT_TAKE - SLICE_LIFT)) / SLICE_LIFT))   # 0 on the pizza .. 1 at the mouth
+        if t < EAT_TAKE:
+            mouth = k                                       # opens wide for the slice
+        elif t < EAT_YUM:                                   # chewing: om - nom - nom
             mouth = 0.8 if int((t - EAT_TAKE) * 6) % 2 == 0 else 0.15
         gfx.blit_center(surf, eater_sprite(mouth, happy=happy), (mx, my))
+        if self.eaten and t < EAT_YUM:
+            # the real slice, cut out of this pizza: it lifts off, flies in an arc and turns its
+            # tip up into the mouth; every bite takes a piece and the rest moves up after it
+            e = ease_out_cubic(k)
+            bites = sum(1 for bt in EAT_BITES if t >= bt)
+            scale = 1 - (1 - SLICE_HOLD) * e
+            last = max(0.0, (t - EAT_BITES[-1] - 0.2) / 0.3)            # the crust goes in last
+            if last < 1:
+                depth = max(0.0, bites * BITE - 0.08) * R * scale
+                tx, ty = mx, my + 48 - depth                                # tip target: bitten edge at the mouth
+                x = px + (tx - px) * e
+                y = py + (ty - py) * e - math.sin(k * math.pi) * 70         # a little arc
+                spr = pygame.transform.rotozoom(self._slice_surface(bites), SLICE_HANG * e, scale * (1 - last))
+                gfx.blit_center(surf, spr, (x, y))
         for x, y, a in self.hearts:                         # hearts rise after "mmmh"
             if a > 0:
                 k = min(1.0, a / 0.3) * (1 - max(0.0, (a - 1.2) / 0.4))
@@ -998,6 +1092,8 @@ class PizzaGame(Game):
             gfx.blit_center(surf, whole_sprite(b.kind, 40), b.c, scale=k)
             progress_ring(surf, b.c, b.r * k + 16, b.progress)
         self.oven.draw(surf, self.t)                            # always there, top right
+        if self.hint_t > HINT_AFTER:
+            self._draw_hint(surf)
         # what the hands carry: a piece (ring fills while held still over the pizza),
         # a ladle of sauce, or a handful of grated cheese
         for n, c in self.carry.items():
@@ -1013,6 +1109,41 @@ class PizzaGame(Game):
             else:
                 for i in range(3):
                     gfx.blit_center(surf, self._sprite("cheese", i * 120), (x - 14 + i * 14, y - 26 + bob), scale=0.7)
+
+    def _draw_hint(self, surf):
+        """Nothing happened for a while: a see-through hand acts out the next step."""
+        t = self.t
+        sx, sy = self.station
+        cx, cy = self.center
+        if self.item:
+            tool = TOOL.get(self.item["kind"], "knife")
+            if tool == "blender":                               # runs by itself, nothing to show
+                return
+            if tool == "knife":                                 # come to the knife and just hold it there
+                x, y = self._cut_point()
+                u = (t * 0.6) % 1.0
+                k = ease_out_cubic(min(1.0, u / 0.4))
+                ghost_hand(surf, (x + 120 * (1 - k), y - 30 - 70 * (1 - k)), t, scale=1 + 0.06 * math.sin(t * 5))
+            else:                                               # rub up and down
+                ghost_hand(surf, (sx + 40, sy - 30 + 60 * math.sin(t * 7)), t,
+                           holding=whole_sprite(self.item["kind"], 34))
+            return
+        if self.bowl and self.bowl["left"] > 0:
+            mode = self.bowl["mode"]
+            what = ladle_sprite() if mode == "sauce" else self._sprite(self.bowl["kind"], 0)
+            if self.carry:                                      # with a piece: hold still on the pizza
+                ghost_hand(surf, (cx + 40, cy - 20), t, scale=1 + 0.08 * math.sin(t * 5))
+                return
+            u = (t * 0.5) % 1.0                                 # bowl -> pizza, then a pause
+            k = ease_out_cubic(min(1.0, u / 0.6))
+            ghost_hand(surf, (sx + (cx - sx) * k, sy + (cy - sy) * k), t, holding=what if k > 0.05 else None)
+            return
+        if self.toppings or self.sauce_dabs:                    # done? -> the oven button
+            ghost_hand(surf, (self.oven.c[0] - 10, self.oven.c[1] + 30), t, scale=1 + 0.1 * math.sin(t * 5))
+            return
+        b = self.bins[int(t / 1.6) % len(self.bins)]            # nothing yet: point at the ingredients in turn
+        k = ease_out_cubic(min(1.0, (t % 1.6) / 0.7))
+        ghost_hand(surf, (cx + (b.c[0] - cx) * k, cy + (b.c[1] - cy) * k), t)
 
     def _draw_work(self, surf, hands):
         """The ingredient on its way: cut on the board, blended in a bowl, or grated. The knife
@@ -1032,8 +1163,8 @@ class PizzaGame(Game):
             # lie in a row next to it
             gfx.blit_center(surf, board_sprite(), (sx, sy + 10))
             w, h = spr.get_size()
-            remain = w * (1 - 0.16 * work)
             left = sx - 110
+            remain = self._cut_right() - left
             if work == 0:
                 gfx.blit_center(surf, spr, (left + w / 2, sy), scale=k_in)
             else:
@@ -1041,10 +1172,11 @@ class PizzaGame(Game):
             for i in range(work):                               # the slices cut so far
                 gfx.blit_center(surf, self._sprite(kind, 0), (left + remain + 26 + i * 30, sy + 4 - (i % 2) * 6),
                                 scale=0.7)
-            if held:                                            # the knife in the hand, blade down
-                gfx.blit_center(surf, tool_sprite("knife"), (held[0] + 10, held[1] + 26), angle=-70)
-            else:
-                gfx.blit_center(surf, tool_sprite("knife"), rest)
+            if held:                                            # the knife in the hand, blade down;
+                sink = 22 * min(1.0, self.item.get("hover", 0.0) / HOVER_CUT[self.ctx.level])   # held still: it sinks in
+                gfx.blit_center(surf, tool_sprite("knife"), (held[0] - 8, held[1] + 30 + sink), angle=70)
+            else:                                               # waiting right over the next cut
+                gfx.blit_center(surf, tool_sprite("knife"), (rest[0], rest[1] + 6 * math.sin(self.t * 4)), angle=70)
         elif tool == "blender":                                 # tomatoes whirl round in the bowl, sauce rises
             gfx.blit_center(surf, bowl_sprite(), (sx, sy + 8))
             if work:                                            # the sauce in the bowl gets more

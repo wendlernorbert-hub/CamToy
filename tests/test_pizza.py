@@ -13,7 +13,7 @@ import numpy as np  # noqa: E402
 import pygame  # noqa: E402
 
 from minigames.common import Ctx, Sounds, Speaker  # noqa: E402
-from minigames.pizza import BAKE_TIME, KINDS, MAX_TOPPINGS, PIECES, TOOL, WORK, PizzaGame  # noqa: E402
+from minigames.pizza import BAKE_TIME, HOVER_CUT, KINDS, MAX_TOPPINGS, PIECES, TOOL, WORK, PizzaGame  # noqa: E402
 from minigames.pose import LM, PRESETS, Pose, make_skeleton  # noqa: E402
 
 W, H = 1280, 720
@@ -120,16 +120,20 @@ check(g.item is None, "short touch does not pick yet")
 step(g, P(sal.c), 0.5)
 check(g.item and g.item["kind"] == "salami" and g.item["work"] == 0, "hand held on the bin puts the whole salami on the board")
 shot(g, "pizza_whole", P(sal.c))
-step(g, P(g.station), 1.0)
-check(g.item["work"] == 0, "a hand resting on the board does not cut")
-stroke(g)
-stroke(g)
-check(g.item["work"] == 0 and g.tool_hand is None, "chopping with an empty hand does nothing: take the knife first")
-take(g)
-check(g.tool_hand is not None, "the hand took the knife")
-for _ in range(WORK["knife"] - 1):
+kx, ky = g._tool_rest("knife")
+cut_x, cut_y = g._cut_point()
+check(ky < cut_y and abs(kx - cut_x) < 30, "the knife waits right over the ingredient")
+sx0, sy0 = g.station
+step(g, P((sx0 + 260, sy0 + 40)), 1.0)
+check(g.item["work"] == 0 and g.tool_hand is None, "a hand away from the board neither takes the knife nor cuts")
+step(g, P((kx, ky)), 0.1)
+check(g.tool_hand is not None, "touching the waiting knife takes it")
+step(g, P((cut_x, cut_y - 30)), HOVER_CUT[1] + 0.05)
+check(g.item["work"] == 1, f"just holding the knife over the ingredient cuts (no chop needed) ({g.item['work']})")
+shot(g, "pizza_knife_hover", P((cut_x, cut_y - 30)))
+for _ in range(WORK["knife"] - 2):
     stroke(g)
-check(g.item and g.item["work"] == WORK["knife"] - 1, f"each downward stroke is one cut ({g.item and g.item['work']})")
+check(g.item and g.item["work"] == WORK["knife"] - 1, f"a fast downward stroke is a cut too ({g.item and g.item['work']})")
 shot(g, "pizza_cutting")
 stroke(g)
 check(g.item is None and g.bowl and g.bowl["mode"] == "piece" and g.bowl["left"] == PIECES and not g.carry,
@@ -201,9 +205,27 @@ step(g, P(g.oven.c), 1.5)
 check(g.phase == "to_oven", "oven button (top right, like 'play again'): the stone oven comes")
 step(g, P(), 0.8)
 (px, py), _ = g._pizza_pos()
-step(g, P((px, py)), 0.2)                            # one touch ...
-step(g, P(), 1.2)                                    # ... and it slides in by itself
-check(g.phase == "bake", f"one touch on the pizza slides it into the oven ({g.phase})")
+step(g, P((px, py)), 0.2)                            # only a touch ...
+step(g, P(), 15.0)                                   # ... and waiting: nothing slides by itself
+check(g.phase == "to_oven" and g.push < 0.05, f"the pizza does not go in by itself ({g.phase}, {g.push:.2f})")
+shot(g, "pizza_push_hint")
+
+
+def push(g, frames, start_dx=-60, step_px=7):
+    """A hand on the pizza (left part) moving steadily towards the oven."""
+    (px, py), _ = g._pizza_pos()
+    for i in range(frames):
+        g.update(1 / 30, P((px + start_dx + step_px * i, py)))
+
+
+x0 = g._pizza_pos()[0][0]
+push(g, 18)                                          # the hand moves 126 px
+half, moved = g.push, g._pizza_pos()[0][0] - x0
+check(80 < moved < 140 and g.phase == "to_oven", f"the hand on the pizza takes it along towards the oven ({moved:.0f} px)")
+step(g, P((W / 2, H * 0.95)), 2.0)                   # let go halfway
+check(abs(g.push - half) < 1e-6, "let go: the pizza stays where it is (no sliding, no sliding back)")
+push(g, 50)
+check(g.phase == "bake", f"pushed again: it goes into the oven ({g.phase}, {g.push:.2f})")
 step(g, P(), BAKE_TIME / 2)
 shot(g, "pizza_bake")
 step(g, P(), BAKE_TIME / 2 + 0.1)

@@ -445,7 +445,7 @@ class Target:
 
 class KungFuGame(Game):
     title = "Kung-Fu-Meister"
-    speech = "Kung Fu! Hau die Ninjas mit Händen und Füßen!"
+    speech = "Kung Fu! Hau die Ninjas weg!"
     DURATION = 45.0
 
     theme = (235, 95, 85)
@@ -601,7 +601,7 @@ class KungFuGame(Game):
         self._check_belt()
 
     def play_draw(self, surf, pose):
-        for p in (pose.all if pose else []):                 # everybody is a blue ninja
+        for p in (pose.all if pose else []):                 # the player is a blue ninja
             self.costumes.setdefault(p.slot, PlayerNinja()).draw(surf, p, self.t)
         if self.boss_banner > 0:                             # red alarm glow at the screen edges
             v = gfx.vignette((self.W, self.H), (255, 30, 40), 220)

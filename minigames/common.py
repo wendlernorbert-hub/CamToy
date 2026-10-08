@@ -211,6 +211,36 @@ def draw_timer(surf, center, w, frac, color=(255, 170, 60)):
         pygame.draw.rect(surf, gfx.lighter(col, 0.55), (x0 + 8, y0 + 4, max(0, fw - 16), 5), border_radius=3)
 
 
+def draw_hand(surf, c, r):
+    """Pictogram of an open hand (no text: the players cannot read yet)."""
+    x, y = c
+    k = r / 80
+    skin = (255, 214, 170)
+    for dx, top, hgt in ((-30, -58, 62), (-10, -74, 74), (10, -74, 74), (30, -58, 62)):     # fingers
+        rr = pygame.Rect(x + (dx - 10) * k, y + top * k, 20 * k, hgt * k)
+        pygame.draw.ellipse(surf, skin, rr)
+    th = pygame.Surface((int(26 * k), int(64 * k)), pygame.SRCALPHA)
+    pygame.draw.ellipse(th, skin, th.get_rect())
+    th = pygame.transform.rotate(th, 40)
+    surf.blit(th, th.get_rect(center=(int(x - 36 * k), int(y + 28 * k))))
+    pygame.draw.ellipse(surf, skin, (x - 38 * k, y - 14 * k, 76 * k, 78 * k))
+    for dx in (-20, 0, 20):                                                    # knuckle lines
+        pygame.draw.arc(surf, (230, 170, 130), (x + (dx - 8) * k, y - 22 * k, 16 * k, 14 * k), 3.6, 5.8, max(2, int(3 * k)))
+
+
+def ghost_hand(surf, pos, t, scale=1.0, holding=None, hold_angle=0.0):
+    """A see-through hand that shows the child what to do next - instead of words.
+    holding: a sprite in the hand (the knife, a piece ...), so it is clear WHAT to do."""
+    def build():
+        spr = gfx.icon_sprite(draw_hand, 58, pad=1.4, outline=4, shadow=0).copy()
+        spr.set_alpha(215)
+        return spr
+    gfx.add_glow(surf, pos, 95 * scale, (255, 240, 170), 0.5 + 0.2 * math.sin(t * 6))
+    if holding is not None:
+        gfx.blit_center(surf, holding, (pos[0] + 12 * scale, pos[1] + 34 * scale), angle=hold_angle)
+    gfx.blit_center(surf, gfx.cached(("ghosthand",), build), pos, scale=scale)
+
+
 def icon_home(surf, c, r):
     x, y = c
     roof = [(x - r, y - r * 0.05), (x, y - r), (x + r, y - r * 0.05)]
@@ -543,7 +573,7 @@ _trails = {}
 
 
 def draw_cursors(surf, pose, t):
-    """Leuchtende Punkte an den Händen (aller Mitspieler) - so sieht das Kind, was es steuert."""
+    """Leuchtende Punkte an den Händen des Spielers - so sieht das Kind, was es steuert."""
     if not pose:
         return
     now = pygame.time.get_ticks() / 1000

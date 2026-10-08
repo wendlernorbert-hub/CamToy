@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import threading
@@ -17,6 +18,8 @@ FPS       = 30
 
 
 MAX_CAMERAS = 8
+IDLE_MENU = 60.0        # seconds without the player moving (or nobody there): back to the menu
+LEVEL_SHOW = 2.0        # seconds the difficulty is shown after a parent pressed 1 / 2 / 3
 
 
 def _try_open(index: int):
@@ -205,8 +208,8 @@ def main() -> None:
 
     from menu import Menu
     import gfx
-    from minigames.common import draw_cursors, ease_out_back, rainbow, text, veil
-    from minigames.pose import make_players
+    from minigames.common import draw_cursors, draw_stars_row, ease_out_back, rainbow, text, veil
+    from minigames.pose import PlayerPicker, make_players
     import telemetry
 
     grabber, tracker, ctx = res["grabber"], res["tracker"], res["ctx"]
@@ -227,9 +230,14 @@ def main() -> None:
     MINI_TRACKS = ["master", "bubbles", "animals", "dressup", "pizza", "car"]
     pending, count_t, count_n = 0, 0.0, 3   # picked menu entry + its 3-2-1 countdown
     phase = "menu"               # menu -> countdown -> mini -> menu
+    picker = PlayerPicker()      # one child plays; anybody else in view is ignored
+    player_slot = None
+    last_active, active_at = time.perf_counter(), None   # when the player last moved, and from where
+    level_t = -9.0               # when a parent last changed the difficulty
 
     def goto_menu() -> None:
-        nonlocal phase, mini, last_fid
+        nonlocal phase, mini, last_fid, last_active
+        last_active = time.perf_counter()
         if mini is not None:
             mini.on_exit()
             mini = None
@@ -250,7 +258,8 @@ def main() -> None:
         phase = "countdown"
 
     def start_mini(i: int) -> None:
-        nonlocal phase, mini
+        nonlocal phase, mini, last_active
+        last_active = time.perf_counter()
         mini = MINIGAMES[i](ctx)
         tracker.set_active(True)
         jukebox.play(MINI_TRACKS[i])
@@ -285,6 +294,7 @@ def main() -> None:
                             cam_index = found[1]
                     elif ev.key in (pygame.K_1, pygame.K_2, pygame.K_3):
                         ctx.level = ev.key - pygame.K_0
+                        level_t = now
                         tele.event("level", level=ctx.level)
                     elif ev.key == pygame.K_m:                # play-test: "look at this moment"
                         tele.mark(screen, phase)
@@ -301,7 +311,14 @@ def main() -> None:
                 pygame.display.flip()
                 continue
 
-            fid, frame, people, mask = tracker.latest()
+            fid, frame, people, masks = tracker.latest()
+            people = picker.update(people, dt)        # only the child plays (see pose.PlayerPicker)
+            if people and people[0][0] != player_slot:
+                player_slot = people[0][0]
+                last_fid = -1                         # cut out the new player right away
+                tele.event("player", slot=player_slot,       # scores: to check the child detection
+                           scores=",".join(f"{s}:{v:.2f}" for s, v in sorted(picker.scores.items())))
+            mask = masks.get(player_slot) if masks and people else None
             want_mask = bool(mini and mini.needs_mask)
             # A game may show the player smaller, at a fixed spot (scale, left, top as screen
             # fractions), e.g. sitting in a car. The pose is mapped into that picture too.
@@ -331,9 +348,19 @@ def main() -> None:
                 people = mapped
             pose = make_players(people, DISPLAY_W, DISPLAY_H)
 
+            # nobody there, or a "person" that never moves (a coat, a poster - play-test: a game
+            # ran all night): the game goes back to the menu by itself
+            pts = pose.pointer_points() if pose else []
+            if pts:
+                c = (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts), len(pts))
+                if active_at is None or c[2] != active_at[2] or math.hypot(c[0] - active_at[0], c[1] - active_at[1]) > 40:
+                    active_at, last_active = c, now
+
             if phase == "mini":
                 mini.update(dt, pose)
-                if mini.exit:
+                if mini.exit or now - last_active > IDLE_MENU:
+                    if not mini.exit:
+                        tele.event("idle", game=type(mini).__name__)
                     goto_menu()
                     continue
             elif phase == "countdown":
@@ -375,6 +402,8 @@ def main() -> None:
                 draw_cursors(screen, pose, count_t)
             else:
                 menu.draw(screen, pose)
+            if now - level_t < LEVEL_SHOW:                # for the parent: the difficulty as 1-3 stars
+                draw_stars_row(screen, (DISPLAY_W - 110, DISPLAY_H - 40), 3, ctx.level, 48)
             tele.frame((time.perf_counter() - now) * 1000, loop_ms, pose)
             tele.tick(screen, phase if phase != "mini" else type(mini).__name__, tracker, grabber)
             tele.draw_overlay(screen)

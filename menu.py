@@ -2,38 +2,20 @@
 import math
 
 import numpy as np
-import pygame
 
 import gfx
-from minigames.common import (DwellButton, draw_button, draw_cursors, rainbow, update_exclusive,
-                              veil)
+from minigames.common import (DwellButton, draw_button, draw_cursors, draw_hand, rainbow,
+                              update_exclusive, veil)
 
 TILE_COLORS = [(235, 95, 85), (70, 175, 255), (255, 130, 200), (95, 205, 110), (255, 160, 60),
                (240, 190, 70), (110, 150, 255)]
-
-
-def _hand(surf, c, r):
-    """Pictogram of an open hand (no text: the players cannot read yet)."""
-    x, y = c
-    k = r / 80
-    skin = (255, 214, 170)
-    for dx, top, hgt in ((-30, -58, 62), (-10, -74, 74), (10, -74, 74), (30, -58, 62)):     # fingers
-        rr = pygame.Rect(x + (dx - 10) * k, y + top * k, 20 * k, hgt * k)
-        pygame.draw.ellipse(surf, skin, rr)
-    th = pygame.Surface((int(26 * k), int(64 * k)), pygame.SRCALPHA)
-    pygame.draw.ellipse(th, skin, th.get_rect())
-    th = pygame.transform.rotate(th, 40)
-    surf.blit(th, th.get_rect(center=(int(x - 36 * k), int(y + 28 * k))))
-    pygame.draw.ellipse(surf, skin, (x - 38 * k, y - 14 * k, 76 * k, 78 * k))
-    for dx in (-20, 0, 20):                                                    # knuckle lines
-        pygame.draw.arc(surf, (230, 170, 130), (x + (dx - 8) * k, y - 22 * k, 16 * k, 14 * k), 3.6, 5.8, max(2, int(3 * k)))
 
 
 def draw_wave_hand(surf, c, t):
     """A waving hand invites to step in front of the camera and wave."""
     pulse = 0.5 + 0.5 * np.sin(t * 5)
     gfx.add_glow(surf, c, 110 + 14 * pulse, (255, 230, 140), 0.6)
-    spr = gfx.cached(("wavehand",), lambda: gfx.icon_sprite(_hand, 70, pad=1.4, outline=4))
+    spr = gfx.cached(("wavehand",), lambda: gfx.icon_sprite(draw_hand, 70, pad=1.4, outline=4))
     gfx.blit_center(surf, spr, c, angle=float(np.sin(t * 6)) * 18)
 
 

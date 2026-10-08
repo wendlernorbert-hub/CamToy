@@ -319,7 +319,7 @@ class RepTask:
 
 INFO = {
     "baum": ("Baum", "Mach den Baum! Strecke die Arme hoch.", pic_baum),
-    "frosch": ("Frosch", "Mach den Frosch! Geh in die Hocke.", pic_frosch),
+    "frosch": ("Frosch", "Mach den Frosch! Duck dich und hüpf wieder hoch.", pic_frosch),
     "stern": ("Stern", "Mach den Stern! Arme hoch und runter.", pic_stern),
     "schmetterling": ("Schmetterling", "Mach den Schmetterling! Flieg mit den Armen.", pic_schmetterling),
     "hase": ("Hase", "Mach den Hasen! Hände wie Hasenohren.", pic_hase),
@@ -385,19 +385,6 @@ def _panel(size):
         pygame.draw.rect(s, (255, 255, 255, 230), s.get_rect(), 5, border_radius=28)
         return gfx.sticker(s, 0, shadow=70, offset=(0, 6), blur=6)
     return gfx.cached(("ypanel", tuple(size)), build)
-
-
-def _sad(surf, c, r):
-    x, y = c
-    ink = (40, 50, 90)
-    pygame.draw.circle(surf, (170, 180, 225), c, int(r))
-    for sx in (-1, 1):
-        pygame.draw.circle(surf, ink, (int(x + sx * r * .36), int(y - r * .18)), max(2, int(r * .09)))
-        pygame.draw.line(surf, ink, (x + sx * r * .55, y - r * .32), (x + sx * r * .2, y - r * .46),
-                         max(2, int(r * .06)))                                # inner ends up = sad
-    pygame.draw.arc(surf, ink, (x - r * .45, y + r * .2, r * .9, r * .6), math.radians(30), math.radians(150),
-                    max(3, int(r * .08)))
-    pygame.draw.circle(surf, (120, 190, 255), (int(x + r * .58), int(y + r * .05)), max(2, int(r * .09)))   # a tear
 
 
 # ---------------------------------------------------------------------- Spiel ---
@@ -473,16 +460,16 @@ class AnimalGame(Game):
             self.end_task(0)                       # time is up: failed, the next animal comes
 
     def end_task(self, stars):
-        """stars: 3 = done, 0 = failed (time ran out)."""
+        """stars: 3 = done, 0 = time ran out. Running out of time is no failure (MANIFEST): the
+        animal hops in and waves, then the next one comes - only the final stars count it."""
         self.earned.append(stars)
         self.phase, self.ptime = "cheer", 0.0
         self.ctx.log("task_end", animal=self.order[self.idx], stars=stars,
                      progress=round(getattr(self, "prog", 0.0), 2))
         if stars == 0:
-            self.ctx.play("down")
-            self.ctx.say("Fehlgeschlagen!")
-            self.particles.burst((self.W / 2, self.H / 2), 18, [(150, 165, 215), (255, 255, 255)],
-                                 220, .7, (4, 9), 500)
+            self.ctx.play("boing")
+            self.particles.burst((self.W / 2, self.H / 2 - 40), 14, [(255, 230, 120), (255, 255, 255)],
+                                 220, .7, (3, 7), 300, "star")
             return
         self.ctx.play("chime")
         self.ctx.say("Super!")
@@ -500,11 +487,13 @@ class AnimalGame(Game):
         gfx.blit_center(surf, button_sprite(96, (255, 200, 60)), c, scale=0.6 + 0.4 * k)
         gfx.blit_center(surf, animal_sprite(key, self.t), c, scale=max(0.05, k))
         progress_ring(surf, c, 116, prog, width=14)
-        # Trainer
-        panel = pygame.Rect(16, 336, 250, 330)
+        # Trainer: upper body only - the child may sit, so the figure never shows the legs
+        # (the frog "squat" is the body ducking down, like a sitting child does it)
+        panel = pygame.Rect(16, 340, 290, 300)
         gfx.blit_center(surf, _panel(panel.size), panel.center)
         asp = self.W / self.H
-        draw_figure(surf, make_skeleton(trainer_vec(key, self.t), aspect=asp, s=0.74), panel.inflate(-20, -20), asp)
+        draw_figure(surf, make_skeleton(trainer_vec(key, self.t), aspect=asp, s=0.74), panel.inflate(-16, -16), asp,
+                    y0=0.15, y1=0.72, legs=False)
         # Sterne oben rechts
         if self.phase == "do":                       # shrinking time bar, red for the last seconds
             draw_timer(surf, (self.W / 2, self.H - 34), 360, 1.0 - self.ptime / TIMEOUT[self.ctx.level])
@@ -514,9 +503,10 @@ class AnimalGame(Game):
             if self.earned[-1]:                      # solved: a big gold star pops up
                 gfx.blit_center(surf, gfx.sunburst(260), c, scale=k, angle=self.t * 30)
                 gfx.blit_center(surf, star_sprite(150), c, scale=max(0.05, k), angle=math.sin(self.t * 4) * 8)
-            else:                                    # failed: a sad face (no words needed)
-                gfx.blit_center(surf, gfx.cached(("sadface",), lambda: gfx.icon_sprite(_sad, 110, pad=1.2)),
-                                c, scale=max(0.05, k))
+            else:                                    # time is up: the animal hops in and waves goodbye
+                hop = abs(math.sin(self.ptime * 7)) * 36
+                gfx.blit_center(surf, animal_sprite(key, self.t), (c[0], c[1] - hop), scale=max(0.05, 1.9 * k),
+                                angle=math.sin(self.ptime * 9) * 12)
 
     def result_draw(self, surf):
         pass                                          # the stars on top say it all

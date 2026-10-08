@@ -63,7 +63,6 @@ def prewarm(games):
     pizza.whole_sprite("cheese", 34)
     pizza.pot_sprite(True)
     pizza.ladle_sprite()
-    pizza.slice_sprite()
     pizza.cutter_wheel_sprite()
     pizza.melted_cheese_sprite(False)
     pizza.melted_cheese_sprite(True)

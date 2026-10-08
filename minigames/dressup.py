@@ -162,7 +162,7 @@ class DressUpGame(Game):
         return Xf(sm[0], sm[1], 1.4 * sw, ang)
 
     def draw_back(self, surf, pose):
-        for p in (pose.all if pose else []):          # everybody in view gets dressed up
+        for p in (pose.all if pose else []):          # the player (main.py hands over nobody else)
             xf = self._body_xf(p)
             if xf is None:
                 continue

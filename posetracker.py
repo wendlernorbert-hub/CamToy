@@ -1,9 +1,10 @@
 """MediaPipe pose tracking for the mini-games, fed by the shared camera grabber.
 
-Runs in its own thread. Up to two people are tracked (a parent with a child on the lap is
-the usual set-up). Every person keeps a "slot" (0 or 1) from frame to frame, so games can
-keep per-person state, and their landmarks are smoothed (one-euro filter: calm when still,
-no lag when the hand swings).
+Runs in its own thread. One child plays, but others may be in the picture (a parent, a
+sibling walking by): up to three people are tracked, so the child is not dropped in favour
+of them - pose.PlayerPicker then picks the child. Every person keeps a "slot" from frame to
+frame, and their landmarks are smoothed (one-euro filter: calm when still, no lag when the
+hand swings).
 Output: mirrored RGB frame (cropped to the screen's shape), a list of (slot, landmarks)
 with the x axis mirrored (so "left" is the player's left on screen), optional person mask.
 """
@@ -16,20 +17,19 @@ import numpy as np
 
 _MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       "models", "pose_landmarker_lite.task")
-MAX_PEOPLE = 2
+MAX_PEOPLE = 3
 MATCH_DIST = 0.3        # a person may move this far (screen fractions) between two frames
 BRIDGE = 0.3            # seconds a lost person is still reported (short dropouts)
 
 
 def _parse(res, seg):
+    """-> (landmarks per person, mask per person in the same order, or None)."""
     people = [np.array([[p.x, p.y, p.visibility if p.visibility is not None else 0.0] for p in lms],
                        dtype=np.float32) for lms in (res.pose_landmarks or [])]
-    mask = None
+    masks = None
     if seg and getattr(res, "segmentation_masks", None):
-        for m in res.segmentation_masks:          # one mask per person: merge them
-            m = np.squeeze(np.array(m.numpy_view(), dtype=np.float32))
-            mask = m if mask is None else np.maximum(mask, m)
-    return people, mask
+        masks = [np.squeeze(np.array(m.numpy_view(), dtype=np.float32)) for m in res.segmentation_masks]
+    return people, masks
 
 
 def _crop(img, aspect):
@@ -95,9 +95,11 @@ class People:
 
     def __init__(self):
         self.slots = {}
+        self.slot_of = {}             # index in `found` -> slot, from the last update
 
     def update(self, found, now):
         free = [s for s in range(MAX_PEOPLE)]
+        self.slot_of = {}
         pairs = []
         for i, lm in enumerate(found):
             c = _centre(lm)
@@ -109,6 +111,7 @@ class People:
                 self.slots[s].update(found[i], now)
                 used_i.add(i)
                 used_s.add(s)
+                self.slot_of[i] = s
         for i, lm in enumerate(found):
             if i in used_i:
                 continue
@@ -121,6 +124,7 @@ class People:
             self.slots[open_[0]] = _Person(open_[0])
             self.slots[open_[0]].update(lm, now)
             used_s.add(open_[0])
+            self.slot_of[i] = open_[0]
         for s in [s for s, p in self.slots.items() if now - p.seen > BRIDGE]:
             del self.slots[s]
         return [(s, self.slots[s].lm) for s in sorted(self.slots)]
@@ -186,7 +190,7 @@ class PoseTracker:
         self._seg = bool(on)
 
     def latest(self):
-        """(frame id, mirrored RGB frame, [(slot, landmarks 33x3)], mask or None)"""
+        """(frame id, mirrored RGB frame, [(slot, landmarks 33x3)], {slot: mask} or None)"""
         with self.lock:
             return self.frame_id, self.frame, self.people, self.mask
 
@@ -217,17 +221,19 @@ class PoseTracker:
                 t_in = time.perf_counter()
                 bgr = _crop(bgr, self.aspect)
                 rgb = np.ascontiguousarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-                found, mask = landmarker.process(rgb)
+                found, masks = landmarker.process(rgb)
                 busy += time.perf_counter() - t_in
                 now = time.time()
                 for lm in found:
                     lm[:, 0] = 1.0 - lm[:, 0]                 # mirror
-                if mask is not None:
-                    mask = np.ascontiguousarray(mask[:, ::-1])
+                tracked = people.update(found, now)
+                mask = None
+                if masks:                                     # each person's own cut-out, by slot
+                    mask = {people.slot_of[i]: np.ascontiguousarray(m[:, ::-1])
+                            for i, m in enumerate(masks) if i in people.slot_of}
                     last_mask, last_mask_t = mask, now
                 elif now - last_mask_t < BRIDGE:
                     mask = last_mask
-                tracked = people.update(found, now)
                 disp = cv2.flip(rgb, 1)
                 with self.lock:
                     self.frame, self.people, self.mask = disp, tracked, mask
